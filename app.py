@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import yfinance as yf # <--- SPRÁVNÝ IMPORT!
+import yfinance as yf
 from datetime import datetime
 import numpy as np
 import plotly.express as px
@@ -165,6 +165,15 @@ st.markdown("""
 # Funkce pro mapování XTB symbolů na yfinance tickery a měny
 def get_ticker_and_currency(symbol):
     symbol_upper = symbol.upper()
+    
+    # === OPRAVA PRO GOOGLE/ALPHABET (Zajišťuje, že se načte GOOGL nebo GOOG) ===
+    # GOOGL je ticker pro Class A (voting)
+    if symbol_upper == 'GOOGL' or symbol_upper == 'GOOGL.US':
+        return 'GOOGL', 'USD' 
+    # GOOG je ticker pro Class C (non-voting)
+    if symbol_upper == 'GOOG' or symbol_upper == 'GOOG.US':
+        return 'GOOG', 'USD'
+    # ===========================================================================
     
     if symbol_upper == 'CSPX.UK' or symbol_upper == 'CSPX':
         return 'CSPX.L', 'USD' 
