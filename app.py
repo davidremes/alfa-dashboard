@@ -63,7 +63,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# --- 2. FUNKCE PRO ZÍSKÁNÍ DAT (OPRAVENÁ VERZE PRO yahooquery) ---
+# --- 2. FUNKCE PRO ZÍSKÁNÍ DAT ---
 
 # Funkce pro mapování XTB symbolů na yahooquery tickery
 def get_ticker_and_currency(symbol):
@@ -85,7 +85,7 @@ def get_ticker_and_currency(symbol):
         return symbol_upper[:-3] + '.L', 'GBP' 
     return symbol, 'USD'
 
-# Funkce pro stažení aktuálních cen (OPRAVENÁ VERZE)
+# Funkce pro stažení aktuálních cen
 @st.cache_data(ttl=600)
 def get_current_prices(symbols):
     if not symbols:
@@ -101,16 +101,13 @@ def get_current_prices(symbols):
     # Načtení kurzů
     if currency_tickers:
         try:
-            # yahooquery umí fetchovat kurzy i ceny
             rates_data = yf(currency_tickers).price
             for curr_ticker in currency_tickers:
                 currency = curr_ticker.split('USD=X')[0]
-                # Kontrola, zda je cena v rates_data
                 if isinstance(rates_data, dict) and curr_ticker in rates_data:
                     rate = rates_data[curr_ticker].get('regularMarketPrice', 1.0)
                     currency_rates[currency] = rate
                 elif isinstance(rates_data, dict) and len(rates_data) == 1 and curr_ticker.split('=')[0] in rates_data:
-                    # Speciální ošetření pro jeden kurz
                     rate = rates_data[curr_ticker.split('=')[0]].get('regularMarketPrice', 1.0)
                     currency_rates[currency] = rate
                 else:
@@ -129,15 +126,12 @@ def get_current_prices(symbols):
         for symbol, (ticker, currency) in ticker_map.items():
             price = 0.0
             
-            # yahooquery vrací dict pro více tickerů, nebo dict pro jeden
             if isinstance(data, dict):
                 if ticker in data:
                     price = data[ticker].get('regularMarketPrice', 0.0)
-                # Ošetření pro případ, že je volán jen jeden ticker, ale v data je jen hodnota
                 elif len(data) > 0 and 'regularMarketPrice' in data and len(yf_tickers) == 1:
                     price = data.get('regularMarketPrice', 0.0)
             
-            # Aplikace kurzu
             prices[symbol] = price * currency_rates.get(currency, 1.0)
             
     except Exception as e:
@@ -155,18 +149,16 @@ def calculate_positions(transactions):
         symbol = row['Symbol']
         quantity = row['Volume']
         
-        # <<< OPRAVA: Změna 'Purchase value' na 'Nominal value' (Nominální hodnota) >>>
+        # <<< OPRAVA CHYBY KEYERROR: Zkusí 'Nominal value', jinak 'Purchase value' >>>
         try:
             purchase_value = row['Nominal value'] 
         except KeyError:
-            # Fallback - pokud by ani Nominal value nefungovalo, zkusíme původní název
             try:
                 purchase_value = row['Purchase value']
             except KeyError:
-                # Pokud nenajde ani jeden, hodí se chyba, což je správné
                 raise KeyError("Sloupec 'Nominal value' ani 'Purchase value' nebyl nalezen. Zkontrolujte prosím přesný název sloupce pro nákupní hodnotu ve vašem Excel reportu.")
 
-        # <<< KONEC OPRAVY >>>
+        # <<< KONEC OPRAVY KEYERROR >>>
         
         transaction_type = row['Type']
         if symbol not in positions:
@@ -181,7 +173,7 @@ def calculate_positions(transactions):
             positions[symbol]['avg_price'] = 0
     return {k: v for k, v in positions.items() if v['quantity'] > 0} 
 
-# Historická data (OPRAVENÁ VERZE)
+# Historická data
 @st.cache_data(ttl=3600)
 def get_historical_prices(symbols, start_date, end_date):
     hist_prices = {}
@@ -193,10 +185,8 @@ def get_historical_prices(symbols, start_date, end_date):
     if currency_tickers:
         try:
             rate_data = yf(currency_tickers).history(start=start_date, end=end_date)
-            # Zpracování historických kurzů
             for curr in currencies:
                 ticker = f"{curr}USD=X"
-                # yahooquery vrací df s MultiIndexem, pokud se volá víc tickerů
                 if isinstance(rate_data.index, pd.MultiIndex):
                     rates_df = rate_data.loc[ticker, 'close'].to_frame()
                 else:
@@ -210,12 +200,10 @@ def get_historical_prices(symbols, start_date, end_date):
     for symbol in symbols:
         ticker, currency = get_ticker_and_currency(symbol)
         try:
-            # Nová metoda: yf().history()
             df = yf(ticker).history(start=start_date, end=end_date)
             prices = df['close'].fillna(method='ffill')
             
             if currency != 'USD' and currency in hist_rates:
-                # Ošetření, aby indexy seděly
                 rates = hist_rates[currency].reindex(prices.index, method='ffill')
                 prices = prices * rates.fillna(1.0)
             
@@ -254,7 +242,6 @@ def main_app():
                 
                 if open_sheet:
                     df_full = pd.read_excel(uploaded_file, sheet_name=open_sheet, header=None)
-                    # Hledání řádku s "Position" (první sloupec) nebo jinou spolehlivou hlavičkou
                     header_index_candidates = df_full[df_full.iloc[:, 0].astype(str).str.contains('Position|Pozice|Symbol', case=False, na=False)].index
                     header_index = header_index_candidates.min() if not header_index_candidates.empty else 9 
                     
@@ -314,7 +301,7 @@ def main_app():
                 try:
                     positions = calculate_positions(df_open)
                 except KeyError as e:
-                    st.error(f"Kritická chyba: {e}. Zkontrolujte přesný název sloupce pro nákupní hodnotu ('Nominal value' nebo 'Purchase value') v listu Otevřené pozice.")
+                    st.error(f"Kritická chyba: {e}. Zkontrolujte přesný název sloupce pro nákupní hodnotu v listu Otevřené pozice.")
                     st.stop()
                 
                 # VÝPOČET DIVIDEND
@@ -331,12 +318,25 @@ def main_app():
                     st.session_state['total_dividends'] = 0 
                 else:
                     symbols = list(positions.keys())
+                    
+                    # <<< OPRAVA: Odfiltruje prázdné a nečisté symboly před dotazem na Yahoo >>>
+                    symbols = [s for s in symbols if s and s.strip() != '']
+                    
+                    if not symbols:
+                         st.warning('Žádné platné symboly k trackování. Zkontrolujte report.')
+                         st.session_state['positions_df'] = pd.DataFrame()
+                         st.stop()
+                    # <<< KONEC OPRAVY >>>
+                    
                     current_prices = get_current_prices(symbols)
 
                     table_data = []
                     total_invested = sum(pos['total_cost'] for pos in positions.values())
                     
                     for symbol, pos in positions.items():
+                        # POUZE PRO PLATNÉ SYMBOLY
+                        if symbol not in symbols: continue
+                        
                         qty = pos['quantity']
                         avg_price = pos['avg_price']
                         current_price = current_prices.get(symbol, 0)
@@ -390,7 +390,7 @@ def main_app():
         
         col1, col2, col3 = st.columns(3) 
 
-        # Box 1: HODNOTA PORTFOLIA (Hlavní - MODRÁ)
+        # Box 1: HODNOTA PORTFOLIA 
         with col1:
             st.markdown(f"""
             <div class="custom-card main-card">
@@ -400,7 +400,7 @@ def main_app():
             </div>
             """, unsafe_allow_html=True)
 
-        # Box 2: CELKEM VYPLACENÉ DIVIDENDY (Symetrická karta)
+        # Box 2: CELKEM VYPLACENÉ DIVIDENDY
         with col2:
             val_class = "value-positive" if total_dividends >= 0 else "value-negative"
             st.markdown(f"""
@@ -411,7 +411,7 @@ def main_app():
             </div>
             """, unsafe_allow_html=True)
         
-        # Box 3: NEREALIZOVANÝ ZISK (Symetrická karta)
+        # Box 3: NEREALIZOVANÝ ZISK
         with col3:
             val_class = "value-positive" if unrealized_profit >= 0 else "value-negative"
             st.markdown(f"""
@@ -463,7 +463,13 @@ def main_app():
         end_date = today
 
         with st.spinner(f'Načítám historická data pro {period}...'):
-            symbols_hist = [s for s in positions_df['Název'].unique()]
+            # OPRAVENO: Filtruje prázdné/neplatné symboly
+            symbols_hist = [s for s in positions_df['Název'].unique() if s and s.strip() != '']
+            
+            if not symbols_hist:
+                st.warning("Nebyl nalezen žádný platný symbol pro historický graf.")
+                st.stop()
+                
             hist_prices = get_historical_prices(symbols_hist, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
             
             portfolio_history = pd.DataFrame(index=pd.to_datetime(pd.date_range(start=start_date, end=end_date)))
@@ -511,7 +517,7 @@ def main_app():
 
         # --- 8. Koláčové grafy rozložení portfolia (Donut Charts) ---
         
-        st.subheader('Rozložení Portfolia')
+        st.subheader('Rozdělení Portfolia')
         
         def categorize_asset(symbol):
             symbol_upper = symbol.upper()
