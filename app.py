@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from yahooquery import Ticker as yf # <--- OPRAVA: Zde se mění knihovna pro spolehlivost
+from yahooquery import Ticker as yf # <--- OPRAVENÝ IMPORT
 from datetime import datetime
 import numpy as np
 import plotly.express as px
@@ -8,17 +8,31 @@ import warnings
 # Potlačení FutureWarnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-# --- 1. KOSMETIKA & CSS (Styling pro karty) ---
+# --- 1. KOSMETIKA & CSS (Styling pro čistě černý motiv - MAXIMÁLNÍ VYNUCENÍ) ---
 st.markdown("""
 <style>
+    /* Hlavní pozadí aplikace - ČISTĚ ČERNÁ */
+    .stApp {
+        background-color: #000000 !important;
+        color: #fafafa !important;
+    }
+    
+    /* Všechny kontejnery uvnitř app (např. st.container, st.columns) */
+    [data-testid="stVerticalBlock"] {
+        background-color: #000000 !important;
+    }
+
     /* Původní jednoduché boxy (Karty s metrikami) */
     .custom-card {
-        background-color: #1a1a1a !important; 
+        background-color: #1a1a1a !important; /* Tmavě šedá pro karty */
         border: 1px solid #2a2a2a !important; 
         border-radius: 10px !important;
         padding: 15px !important;
         margin-bottom: 15px !important; 
-        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.4) !important;
+        box-shadow: 0 4px 8px 0 rgba(0, 0, 0, 0.2); 
+        height: 100%;
+        min-height: 120px !important;
+        color: #fafafa;
     }
     .custom-card-title {
         color: #A9A9A9 !important;
@@ -30,301 +44,584 @@ st.markdown("""
         font-size: 24px;
         font-weight: bold;
     }
+    /* Vynucení černé pro tabulky a pozadí pro tmavý vzhled */
+    div[data-testid="stDataFrame"], 
+    div[data-testid="stTable"], 
+    div[data-testid="stDataEditor"] {
+        background-color: #000000 !important;
+        border: 1px solid #2a2a2a !important;
+    }
+    .stFileUploader section,
+    .stFileUploader section > div,
+    .stFileUploader [data-testid="stFileUploadDropzone"] {
+        background-color: #1a1a1a !important; 
+        border: 2px dashed #444444 !important;
+        color: #fafafa !important;
+    }
+    
 </style>
 """, unsafe_allow_html=True)
 
 
-# --- 2. CACHING A DATA MANAGEMENT ---
+# --- 2. FUNKCE PRO ZÍSKÁNÍ DAT (OPRAVENÁ VERZE PRO yahooquery) ---
 
-@st.cache_data(ttl=60*60*4) # Kešování na 4 hodiny
-def load_and_preprocess_data(uploaded_file):
-    """Načte, vyčistí a předzpracuje data z XTB."""
-    try:
-        # Použijte pandas k přečtení souboru (XTB často exportuje CSV s oddělovačem ';')
-        df = pd.read_csv(uploaded_file, sep=';', decimal=',')
-    except Exception as e:
-        st.error(f"Chyba při čtení souboru. Zkontrolujte, zda je CSV formát a oddělovač je ';'. Chyba: {e}")
-        return None
+# Funkce pro mapování XTB symbolů na yahooquery tickery
+def get_ticker_and_currency(symbol):
+    symbol_upper = symbol.upper()
+    
+    if symbol_upper == 'CSPX.UK' or symbol_upper == 'CSPX':
+        return 'CSPX.L', 'USD' 
+    if symbol_upper == 'CNDX.UK' or symbol_upper == 'CNDX':
+        return 'CNDX.L', 'USD' 
+    if 'TUI' in symbol_upper and symbol_upper.endswith('.DE'):
+        return 'TUI1.DE', 'EUR' 
+    elif symbol_upper.endswith('.US'):
+        return symbol_upper[:-3], 'USD'
+    elif symbol_upper.endswith('.DE'):
+        return symbol_upper[:-3] + '.DE', 'EUR'
+    elif symbol_upper.endswith('.IT'):
+        return symbol_upper[:-3] + '.MI', 'EUR'
+    elif symbol_upper.endswith('.UK'):
+        return symbol_upper[:-3] + '.L', 'GBP' 
+    return symbol, 'USD'
 
-    # Normalizace názvů sloupců (očištění od mezer a speciálních znaků)
-    df.columns = df.columns.str.strip().str.replace('[^A-Za-z0-9_ -]', '', regex=True).str.replace(' ', '_')
-    
-    # Filtrování transakcí, které nejsou relevance (např. vklady/výběry)
-    df = df[df['Type'].isin(['BUY', 'SELL', 'Deposit', 'Withdrawal', 'Fee', 'Dividend', 'Taxes'])]
-    
-    # Převod datumu
-    df['Time'] = pd.to_datetime(df['Time'])
-    
-    # Ponechání pouze důležitých sloupců
-    required_cols = [
-        'Time', 'Type', 'Symbol', 'ISIN', 'Volume', 'Price', 'Commission', 
-        'Currency', 'Profit', 'Comment', 'Nominal_value', 'Reference_price', 
-        'Settle_date', 'Contract_size', 'Profit_in_currency', 'Margin_used', 
-        'Open_price', 'Close_price', 'Taxes', 'Coupon', 'Pips', 'Amount'
-    ]
-    df = df[[col for col in required_cols if col in df.columns]]
-
-    # Přepočet sloupce 'Amount' (který bývá klíčový u XTB pro poplatky, vklady/výběry a dividendy)
-    # NaN nahradíme nulou
-    if 'Amount' in df.columns:
-        df['Amount'] = df['Amount'].fillna(0)
-    
-    return df
-
-@st.cache_data(ttl=60*60*4)
-def get_current_prices(tickers):
-    """
-    Načte aktuální ceny z Yahoo Finance pomocí yahooquery. (OPRAVENÁ FUNKCE)
-    """
-    
-    if not tickers:
+# Funkce pro stažení aktuálních cen (OPRAVENÁ VERZE)
+@st.cache_data(ttl=600)
+def get_current_prices(symbols):
+    if not symbols:
         return {}
-    
-    # yf je nyní Ticker z yahooquery
-    try:
-        data = yf(tickers).price
-        prices = {}
-        for ticker in tickers:
-            if isinstance(data, dict):
-                # Standardní chování pro více tickerů
-                try:
-                    price = data[ticker]['regularMarketPrice']
-                except (KeyError, TypeError):
-                    price = 0.0 # Pokud cena chybí
-            else:
-                # Chování pro jeden ticker
-                try:
-                    price = data.get('regularMarketPrice', 0.0)
-                except AttributeError:
-                    price = 0.0
-            
-            # Kontrola, že cena je platná
-            prices[ticker] = price if price is not None and price != 0 else 0.0
-            
-        return prices
         
+    ticker_map = {symbol: get_ticker_and_currency(symbol) for symbol in symbols}
+    yf_tickers = [v[0] for v in ticker_map.values()]
+    currencies_to_fetch = set(v[1] for v in ticker_map.values() if v[1] != 'USD')
+    
+    currency_rates = {'USD': 1.0}
+    currency_tickers = [f"{curr}USD=X" for curr in currencies_to_fetch]
+    
+    # Načtení kurzů
+    if currency_tickers:
+        try:
+            # yahooquery umí fetchovat kurzy i ceny
+            rates_data = yf(currency_tickers).price
+            for curr_ticker in currency_tickers:
+                currency = curr_ticker.split('USD=X')[0]
+                # Kontrola, zda je cena v rates_data
+                if isinstance(rates_data, dict) and curr_ticker in rates_data:
+                    rate = rates_data[curr_ticker].get('regularMarketPrice', 1.0)
+                    currency_rates[currency] = rate
+                elif isinstance(rates_data, dict) and len(rates_data) == 1 and curr_ticker.split('=')[0] in rates_data:
+                    # Speciální ošetření pro jeden kurz
+                    rate = rates_data[curr_ticker.split('=')[0]].get('regularMarketPrice', 1.0)
+                    currency_rates[currency] = rate
+                else:
+                    currency_rates[currency] = 1.0
+
+        except Exception as e:
+            st.warning(f"Problém se stažením kurzu, používám výchozí 1.0. Chyba: {e}")
+            pass 
+            
+    prices = {}
+    
+    # Načtení cen akcií
+    try:
+        data = yf(yf_tickers).price
+        
+        for symbol, (ticker, currency) in ticker_map.items():
+            price = 0.0
+            
+            # yahooquery vrací dict pro více tickerů, nebo dict pro jeden
+            if isinstance(data, dict):
+                if ticker in data:
+                    price = data[ticker].get('regularMarketPrice', 0.0)
+                # Ošetření pro případ, že je volán jen jeden ticker, ale v data je jen hodnota
+                elif len(data) > 0 and 'regularMarketPrice' in data and len(yf_tickers) == 1:
+                    price = data.get('regularMarketPrice', 0.0)
+            
+            # Aplikace kurzu
+            prices[symbol] = price * currency_rates.get(currency, 1.0)
+            
     except Exception as e:
-        st.warning(f"Chyba při načítání aktuálních cen pro {tickers}: {e}")
-        return {ticker: 0.0 for ticker in tickers}
+        st.error(f"Nepodařilo se stáhnout ceny pro jeden nebo více symbolů. Chyba: {e}")
+        for symbol in symbols:
+             prices[symbol] = 0
+             
+    return prices
+
+# Funkce pro výpočet otevřených pozic (statická data z reportu)
+def calculate_positions(transactions):
+    positions = {}
+    for _, row in transactions.iterrows():
+        if pd.isna(row['Symbol']): continue
+        symbol = row['Symbol']
+        quantity = row['Volume']
+        
+        # <<< OPRAVA: Změna 'Purchase value' na 'Nominal value' (Nominální hodnota) >>>
+        try:
+            purchase_value = row['Nominal value'] 
+        except KeyError:
+            # Fallback - pokud by ani Nominal value nefungovalo, zkusíme původní název
+            try:
+                purchase_value = row['Purchase value']
+            except KeyError:
+                # Pokud nenajde ani jeden, hodí se chyba, což je správné
+                raise KeyError("Sloupec 'Nominal value' ani 'Purchase value' nebyl nalezen. Zkontrolujte prosím přesný název sloupce pro nákupní hodnotu ve vašem Excel reportu.")
+
+        # <<< KONEC OPRAVY >>>
+        
+        transaction_type = row['Type']
+        if symbol not in positions:
+            positions[symbol] = {'quantity': 0, 'total_cost': 0}
+        if 'BUY' in transaction_type.upper():
+            positions[symbol]['quantity'] += quantity
+            positions[symbol]['total_cost'] += purchase_value
+    for symbol in positions:
+        if positions[symbol]['quantity'] > 0:
+            positions[symbol]['avg_price'] = positions[symbol]['total_cost'] / positions[symbol]['quantity']
+        else:
+            positions[symbol]['avg_price'] = 0
+    return {k: v for k, v in positions.items() if v['quantity'] > 0} 
+
+# Historická data (OPRAVENÁ VERZE)
+@st.cache_data(ttl=3600)
+def get_historical_prices(symbols, start_date, end_date):
+    hist_prices = {}
+    currencies = set(get_ticker_and_currency(s)[1] for s in symbols if get_ticker_and_currency(s)[1] != 'USD')
+    hist_rates = {}
+    
+    # Načtení historických kurzů
+    currency_tickers = [f"{curr}USD=X" for curr in currencies]
+    if currency_tickers:
+        try:
+            rate_data = yf(currency_tickers).history(start=start_date, end=end_date)
+            # Zpracování historických kurzů
+            for curr in currencies:
+                ticker = f"{curr}USD=X"
+                # yahooquery vrací df s MultiIndexem, pokud se volá víc tickerů
+                if isinstance(rate_data.index, pd.MultiIndex):
+                    rates_df = rate_data.loc[ticker, 'close'].to_frame()
+                else:
+                    rates_df = rate_data['close'].to_frame()
+                
+                hist_rates[curr] = rates_df['close'].fillna(method='ffill')
+        except Exception as e:
+            st.warning(f"Chyba při stahování historických kurzů: {e}")
+            pass
+            
+    for symbol in symbols:
+        ticker, currency = get_ticker_and_currency(symbol)
+        try:
+            # Nová metoda: yf().history()
+            df = yf(ticker).history(start=start_date, end=end_date)
+            prices = df['close'].fillna(method='ffill')
+            
+            if currency != 'USD' and currency in hist_rates:
+                # Ošetření, aby indexy seděly
+                rates = hist_rates[currency].reindex(prices.index, method='ffill')
+                prices = prices * rates.fillna(1.0)
+            
+            hist_prices[symbol] = prices
+            
+        except Exception as e:
+            st.warning(f"Chyba při stahování historických cen pro {symbol}: {e}")
+            hist_prices[symbol] = pd.Series()
+            
+    return hist_prices
 
 
-def aggregate_positions(df, current_prices):
-    """
-    Agreguje transakce do aktuálních pozic a přepočítá hodnoty.
-    """
-    
-    # Odstranit vklady/výběry pro zjištění pozic
-    df_positions = df[df['Type'].isin(['BUY', 'SELL'])]
-    
-    # Agregace pozic
-    positions = df_positions.groupby('Symbol').agg(
-        Total_Volume=('Volume', 'sum'),
-        Total_Cost=('Amount', 'sum') # 'Amount' je zde celková částka za transakci
-    ).reset_index()
-
-    # Filtrovat pouze otevřené pozice (Total_Volume != 0)
-    positions = positions[positions['Total_Volume'] != 0].copy()
-
-    if positions.empty:
-        return pd.DataFrame()
-
-    # --- Výpočty ---
-    
-    positions['Název'] = positions['Symbol']
-    positions['Kusů'] = positions['Total_Volume'].abs().round(4)
-    positions['Průměrná nákupní cena (USD)'] = (positions['Total_Cost'] / positions['Total_Volume']).abs().round(4)
-    positions['Aktuální cena (USD)'] = positions['Název'].map(current_prices).fillna(0.0).round(4)
-    
-    # Manuální úprava - pokud cena z yf je 0, přidáme sloupec pro manuální úpravu
-    positions['Aktuální cena (USD) - Manuální úprava'] = positions['Aktuální cena (USD)'].apply(
-        lambda x: x if x > 0.0 else positions['Průměrná nákupní cena (USD)']
-    )
-
-    positions['Tržní hodnota (USD)'] = (positions['Kusů'] * positions['Aktuální cena (USD)']).round(2)
-    positions['Náklady (USD)'] = (positions['Kusů'] * positions['Průměrná nákupní cena (USD)']).round(2)
-    positions['Nezrealizovaný zisk/ztráta (USD)'] = (positions['Tržní hodnota (USD)'] - positions['Náklady (USD)']).round(2)
-    
-    # Procento zisku/ztráty
-    positions['Nezrealizovaný zisk/ztráta (%)'] = np.where(
-        positions['Náklady (USD)'] != 0,
-        ((positions['Tržní hodnota (USD)'] / positions['Náklady (USD)']) - 1) * 100,
-        0
-    ).round(2)
-
-    # Typ pozice
-    positions['Typ'] = np.where(positions['Total_Volume'] > 0, 'LONG', 'SHORT')
-
-    return positions[['Název', 'Typ', 'Kusů', 'Průměrná nákupní cena (USD)', 
-                      'Aktuální cena (USD)', 'Aktuální cena (USD) - Manuální úprava',
-                      'Náklady (USD)', 'Tržní hodnota (USD)', 
-                      'Nezrealizovaný zisk/ztráta (USD)', 'Nezrealizovaný zisk/ztráta (%)']]
-
-def calculate_totals(positions_df, original_df):
-    """
-    Vypočítá celkové metriky pro Dashboard.
-    """
-    
-    # 1. Neinvestiční cashflow (Vklady/Výběry/Poplatky/Dividendy)
-    total_deposits = original_df[original_df['Type'] == 'Deposit']['Amount'].sum()
-    total_withdrawals = original_df[original_df['Type'] == 'Withdrawal']['Amount'].sum()
-    total_fees = original_df[original_df['Type'].isin(['Fee', 'Commission'])]['Amount'].sum()
-    total_dividends = original_df[original_df['Type'].isin(['Dividend', 'Coupon'])]['Amount'].sum()
-    
-    total_investment = total_deposits - total_withdrawals
-    
-    # 2. Celkové portfolio
-    current_market_value = positions_df['Tržní hodnota (USD)'].sum()
-    total_cost_basis = positions_df['Náklady (USD)'].sum()
-    total_unrealized_pnl = current_market_value - total_cost_basis
-    
-    # 3. Zrealizovaný zisk (Zisk/Ztráta ze SELL transakcí)
-    realized_profit = original_df['Profit'].fillna(0).sum().round(2)
-    
-    # 4. Celkový zisk
-    total_profit = total_unrealized_pnl + realized_profit + total_dividends
-    
-    return {
-        'current_market_value': current_market_value,
-        'total_cost_basis': total_cost_basis,
-        'total_unrealized_pnl': total_unrealized_pnl,
-        'realized_profit': realized_profit,
-        'total_dividends': total_dividends,
-        'total_profit': total_profit,
-        'total_investment': total_investment,
-    }
-
-# --- STREAMLIT UI A HLAVNÍ LOGIKA ---
+# --- 3. HLAVNÍ ČÁST APLIKACE ---
 
 def main_app():
-    st.title("💰 Alfa Dashboard - Analýza XTB Výpisu")
-    st.markdown("---")
+    st.title('💰 Alfa Dashboard - Analýza XTB Výpisu')
+    st.info('Nahraj Excel/CSV report z XTB. Všechny hodnoty jsou automaticky převedeny do USD. Data jsou aktuální díky Yahoo Finance.')
 
-    # --- Uploader souborů ---
-    uploaded_file = st.file_uploader(
-        "Nahrajte CSV výpis transakční historie z XTB (Používá se pro beta testování. Data nejsou ukládána.)", 
-        type=["csv"]
-    )
+    uploaded_file = st.file_uploader('Nahraj CSV nebo Excel report z XTB', type=['csv', 'xlsx'])
 
+    df_open = pd.DataFrame()
+    df_closed = pd.DataFrame() 
+    df_cash = pd.DataFrame() 
+
+    # Načítání souboru
     if uploaded_file is not None:
-        
-        # Načtení a předzpracování dat
-        df = load_and_preprocess_data(uploaded_file)
-        if df is None or df.empty:
-            st.warning("Nahraný soubor neobsahuje platné transakce po filtraci. Zkuste jiný CSV soubor.")
-            return
+        try:
+            if uploaded_file.name.endswith('.xlsx'):
+                excel = pd.ExcelFile(uploaded_file)
+                sheets = excel.sheet_names
+                open_sheet = next((s for s in sheets if 'OPEN POSITION' in s.upper() or 'OTEVŘENÁ POZICE' in s.upper()), None)
+                closed_sheet = next((s for s in sheets if 'CLOSED POSITION' in s.upper() or 'UZAVŘENÁ POZICE' in s.upper()), None)
+                cash_sheet = next((s for s in sheets if 'CASH OPERATION' in s.upper() or 'HOTOVOSTNÍ OPERACE' in s.upper()), None)
+                
+                # --- Robustní hledání hlaviček ---
+                
+                if open_sheet:
+                    df_full = pd.read_excel(uploaded_file, sheet_name=open_sheet, header=None)
+                    # Hledání řádku s "Position" (první sloupec) nebo jinou spolehlivou hlavičkou
+                    header_index_candidates = df_full[df_full.iloc[:, 0].astype(str).str.contains('Position|Pozice|Symbol', case=False, na=False)].index
+                    header_index = header_index_candidates.min() if not header_index_candidates.empty else 9 
+                    
+                    df_open = pd.read_excel(uploaded_file, sheet_name=open_sheet, header=header_index).dropna(how='all')
+                    st.success(f"Načten list Otevřené pozice: {open_sheet}")
 
-        # Uložit DataFrame do session_state, aby se při znovunačtení stránky nečetl znovu
-        if 'original_df' not in st.session_state:
-            st.session_state['original_df'] = df
+                if closed_sheet:
+                    df_full_closed = pd.read_excel(uploaded_file, sheet_name=closed_sheet, header=None)
+                    header_index_candidates = df_full_closed[df_full_closed.iloc[:, 0].astype(str).str.contains('Position|Pozice|Symbol', case=False, na=False)].index
+                    header_index_closed = header_index_candidates.min() if not header_index_candidates.empty else 9
+                    df_closed = pd.read_excel(uploaded_file, sheet_name=closed_sheet, header=header_index_closed).dropna(how='all')
+                    st.success(f"Načten list Uzavřené pozice: {closed_sheet}")
+                
+                # NAČTENÍ CASH OPERATION HISTORY
+                if cash_sheet:
+                    df_full_cash = pd.read_excel(uploaded_file, sheet_name=cash_sheet, header=None)
+                    header_index_candidates = df_full_cash[df_full_cash.iloc[:, 1].astype(str).str.contains('ID|Type|Typ', case=False, na=False)].index
+                    header_index_cash = header_index_candidates.min() if not header_index_candidates.empty else 9
+                    df_cash = pd.read_excel(uploaded_file, sheet_name=cash_sheet, header=header_index_cash).dropna(how='all')
+                    st.success(f"Načtena historie hotovostních operací (pro dividendy): {cash_sheet}.")
 
-        # --- Načtení aktuálních cen ---
-        unique_tickers = st.session_state['original_df']['Symbol'].unique().tolist()
-        
-        # Načtení aktuálních cen
-        current_prices = get_current_prices(unique_tickers)
-        
-        # Agregace pozic
-        positions_df = aggregate_positions(st.session_state['original_df'], current_prices)
+            else: # HANDLING CSV FILES
+                # Pro CSV je obtížné detekovat sheet, načítá se jako jedna tabulka
+                df_temp = pd.read_csv(uploaded_file, header=10).dropna(how='all')
+                
+                if 'Gross P/L' in df_temp.columns and 'Position' in df_temp.columns:
+                    df_closed = df_temp
+                    st.success("Načten CSV soubor: Uzavřené pozice.")
+                    
+                elif 'Purchase value' in df_temp.columns or 'Nominal value' in df_temp.columns:
+                    df_open = df_temp
+                    st.success("Načten CSV soubor: Otevřené pozice.")
+                
+                elif 'Type' in df_temp.columns and 'Amount' in df_temp.columns:
+                    df_cash = df_temp
+                    st.success("Načten CSV soubor: Hotovostní operace (pro dividendy).")
+                
+                else:
+                    st.warning("Načten CSV soubor, ale nebyl rozpoznán. Zpracovávám jako Otevřené pozice.")
+                    df_open = df_temp
 
-        if positions_df.empty:
-            st.success("Žádné otevřené pozice k analýze. Gratuluji k čistému portfoliu!")
-            return
-
-        # Uložení pozic do session_state pro úpravy cen
-        if 'positions_df' not in st.session_state:
-            st.session_state['positions_df'] = positions_df
-
-        # --- Výpočty celkových metrik ---
-        totals = calculate_totals(st.session_state['positions_df'], st.session_state['original_df'])
-
-
-        # --- 4. Zobrazení metrik (Karty) ---
-        st.header("Celkový Přehled Portfolia")
-        
-        col1, col2, col3, col4 = st.columns(4)
-
-        # Funkce pro vykreslení metrické karty (pro čistší UI)
-        def metric_card(col, title, value, prefix='', suffix=' USD', color_threshold=None):
-            html = f"""
-            <div class="custom-card">
-                <div class="custom-card-title">{title}</div>
-                <div class="custom-card-value">{prefix}{value:,.2f}{suffix}</div>
-            </div>
-            """
-            col.markdown(html, unsafe_allow_html=True)
+                
+        except Exception as e:
+            st.error(f"Chyba při čtení souboru. Zkontroluj formát (CSV s oddělovačem ';'). Chyba: {e}")
+            df_open = pd.DataFrame()
+            df_closed = pd.DataFrame()
+            df_cash = pd.DataFrame()
             
-        metric_card(col1, "Tržní Hodnota (Market Value)", totals['current_market_value'])
-        metric_card(col2, "Celkové Náklady (Cost Basis)", totals['total_cost_basis'])
-        metric_card(col3, "Celkový Nerealizovaný Zisk/Ztráta", totals['total_unrealized_pnl'])
-        metric_card(col4, "Celkový Zisk (Realizovaný + Nerealizovaný + Dividendy)", totals['total_profit'])
 
-        st.markdown("---")
-
-        # --- 5. Grafy (Donut Charts) ---
-        st.header("Grafické Rozložení")
+    # Tlačítko pro spuštění trackování a uložení stavu
+    if st.button('Trackuj Portfolio a Získej Aktuální Data') or 'positions_df' in st.session_state:
         
-        col_chart1, col_chart2 = st.columns(2)
-
-        # Graf 1: Rozdělení tržní hodnoty podle aktiva
-        with col_chart1:
-            st.subheader("Tržní Rozložení Podle Aktiva (USD)")
-            fig1 = px.pie(
-                st.session_state['positions_df'],
-                names='Název',
-                values='Tržní hodnota (USD)',
-                hole=.6,
-                title='Tržní Hodnota',
-                color_discrete_sequence=px.colors.sequential.Plotly3
-            )
-            # Nastavení tmavého pozadí pro Plotly
-            fig1.update_layout(
-                plot_bgcolor='#000000',
-                paper_bgcolor='#000000',
-                font_color='#FAFAFA',
-                legend_title_text='Aktiva'
-            )
-            fig1.update_traces(textinfo='percent+label')
-            st.plotly_chart(fig1, use_container_width=True)
-
-        # Graf 2: Rozdělení nákladů
-        with col_chart2:
-            st.subheader("Nákladové Rozložení Podle Aktiva (USD)")
-            fig2 = px.pie(
-                st.session_state['positions_df'],
-                names='Název',
-                values='Náklady (USD)',
-                hole=.6,
-                title='Náklady',
-                color_discrete_sequence=px.colors.sequential.Plasma
-            )
-            # Nastavení tmavého pozadí pro Plotly
-            fig2.update_layout(
-                plot_bgcolor='#000000',
-                paper_bgcolor='#000000',
-                font_color='#FAFAFA',
-                legend_title_text='Aktiva'
-            )
-            fig2.update_traces(textinfo='percent+label')
-            st.plotly_chart(fig2, use_container_width=True)
-
-        st.markdown("---")
-
-        # --- 6. Tabulka a Manuální úpravy ---
-        st.header("Detailní Pozice a Úpravy Cen")
-        st.info("Pokud se Aktuální cena (USD) nenačetla, můžete ji ručně zadat do sloupce 'Aktuální cena (USD) - Manuální úprava'.")
-
-        # Příprava DF pro úpravy (zobrazujeme jen relevantní sloupce)
-        editable_df = st.session_state['positions_df'][['Název', 'Kusů', 'Průměrná nákupní cena (USD)', 
-                                                        'Aktuální cena (USD)', 'Aktuální cena (USD) - Manuální úprava',
-                                                        'Náklady (USD)', 'Tržní hodnota (USD)']]
+        # --- 4. Inicializace, stažení dat a přepočet ---
         
-        # Nastavení cen z manuální úpravy
-        if 'manual_prices' not in st.session_state:
-            st.session_state['manual_prices'] = {}
-        
-        editable_df_filtered = editable_df.copy()
+        if 'positions_df' not in st.session_state or st.session_state.get('uploaded_file_name') != uploaded_file.name:
+            with st.spinner('Počítám metriky a stahuji data z Yahoo Finance...'):
+                try:
+                    positions = calculate_positions(df_open)
+                except KeyError as e:
+                    st.error(f"Kritická chyba: {e}. Zkontrolujte přesný název sloupce pro nákupní hodnotu ('Nominal value' nebo 'Purchase value') v listu Otevřené pozice.")
+                    st.stop()
+                
+                # VÝPOČET DIVIDEND
+                if 'Type' in df_cash.columns and 'Amount' in df_cash.columns:
+                    dividends_df = df_cash[df_cash['Type'].astype(str).str.upper().str.contains('DIVIDENT', na=False)]
+                    total_dividends = dividends_df['Amount'].sum() if not dividends_df.empty else 0
+                else:
+                    total_dividends = 0
+                
+                if not positions:
+                    st.warning('Žádné aktivní otevřené pozice nebyly nalezeny ve vstupních datech.')
+                    st.session_state['positions_df'] = pd.DataFrame()
+                    st.session_state['total_invested'] = 0
+                    st.session_state['total_dividends'] = 0 
+                else:
+                    symbols = list(positions.keys())
+                    current_prices = get_current_prices(symbols)
 
-        # Zobrazení a úprava
+                    table_data = []
+                    total_invested = sum(pos['total_cost'] for pos in positions.values())
+                    
+                    for symbol, pos in positions.items():
+                        qty = pos['quantity']
+                        avg_price = pos['avg_price']
+                        current_price = current_prices.get(symbol, 0)
+                        
+                        table_data.append({
+                            'Název': symbol, 'Množství': qty, 
+                            'Průměrná cena (USD)': avg_price,
+                            'Aktuální cena (USD)': current_price, 
+                            'Velikost pozice (USD)': 0.0, 
+                            'Nerealizovaný Zisk (USD)': 0.0, 
+                            'Nerealizovaný % Zisk': 0.0, 
+                            'Náklad pozice (USD)': avg_price * qty
+                        })
+
+                    positions_df_init = pd.DataFrame(table_data)
+                    
+                    st.session_state['positions_df'] = positions_df_init
+                    st.session_state['total_invested'] = total_invested
+                    st.session_state['total_dividends'] = total_dividends 
+                    st.session_state['uploaded_file_name'] = uploaded_file.name
+
+        
+        if st.session_state['positions_df'].empty:
+            st.warning("Žádné aktivní pozice pro zobrazení. Nahrajte prosím soubor s daty a stiskněte 'Trackuj Portfolio'.")
+            st.stop() 
+
+        # --- 5. Přepočet metrik (Na základě dat v Session State) ---
+        
+        edited_df = st.session_state['positions_df'].copy()
+        total_dividends = st.session_state['total_dividends'] # Načtení dividend
+
+        edited_df['Velikost pozice (USD)'] = edited_df['Množství'] * edited_df['Aktuální cena (USD)']
+        edited_df['Nerealizovaný Zisk (USD)'] = (edited_df['Aktuální cena (USD)'] - edited_df['Průměrná cena (USD)']) * edited_df['Množství']
+        edited_df['Nerealizovaný % Zisk'] = (edited_df['Nerealizovaný Zisk (USD)'] / edited_df['Náklad pozice (USD)'] * 100).fillna(0)
+        
+        total_portfolio_value = edited_df['Velikost pozice (USD)'].sum()
+        unrealized_profit = edited_df['Nerealizovaný Zisk (USD)'].sum()
+        total_invested = st.session_state['total_invested']
+        
+        unrealized_profit_pct = (unrealized_profit / total_invested * 100) if total_invested > 0 else 0
+        
+        edited_df['% v portfoliu'] = edited_df['Velikost pozice (USD)'].apply(
+            lambda x: (x / total_portfolio_value * 100) if total_portfolio_value > 0 else 0
+        )
+        
+        positions_df = edited_df.copy() 
+        
+        # --- 6. VÝKONNOSTNÍ BOXY ---
+        
+        st.header('Přehled Výkonnosti')
+        
+        col1, col2, col3 = st.columns(3) 
+
+        # Box 1: HODNOTA PORTFOLIA (Hlavní - MODRÁ)
+        with col1:
+            st.markdown(f"""
+            <div class="custom-card main-card">
+                <div class="card-title">HODNOTA PORTFOLIA</div>
+                <p class="main-card-value">{round(total_portfolio_value, 2):,.2f} USD</p>
+                <p style="font-size:12px; margin-top:5px; color:#fafafa;">K {datetime.now().strftime('%d. %m. %Y')}</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Box 2: CELKEM VYPLACENÉ DIVIDENDY (Symetrická karta)
+        with col2:
+            val_class = "value-positive" if total_dividends >= 0 else "value-negative"
+            st.markdown(f"""
+            <div class="custom-card">
+                <div class="card-title">CELKEM VYPLACENÉ DIVIDENDY</div>
+                <p class="card-value {val_class}">{round(total_dividends, 2):,.2f} USD</p>
+                <p style="font-size:12px; color:#999999;">Od počátku reportu</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Box 3: NEREALIZOVANÝ ZISK (Symetrická karta)
+        with col3:
+            val_class = "value-positive" if unrealized_profit >= 0 else "value-negative"
+            st.markdown(f"""
+            <div class="custom-card">
+                <div class="card-title">NEREALIZOVANÝ ZISK</div>
+                <p class="card-value {val_class}">{round(unrealized_profit, 2):,.2f} USD</p>
+                <p style="font-size:12px; color:#999999;">{round(unrealized_profit_pct, 2):,.2f} % celkové investice</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Druhý řádek: CELKOVÁ HODNOTA a INVESTOVANÁ ČÁSTKA
+        col4, col5 = st.columns(2)
+        
+        # Box 4: CELKOVÁ HODNOTA (Portfolio + Dividendy)
+        with col4:
+            total_value_with_profit = total_portfolio_value + total_dividends
+            st.markdown(f"""
+            <div class="custom-card">
+                <div class="card-title">CELKOVÁ HODNOTA (Portfolio + Dividendy)</div>
+                <p class="card-value value-neutral">{round(total_value_with_profit, 2):,.2f} USD</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Box 5: INVESTOVANÁ ČÁSTKA
+        with col5:
+            st.markdown(f"""
+            <div class="custom-card">
+                <div class="card-title">INVESTOVANÁ ČÁSTKA</div>
+                <p class="card-value value-neutral">{round(total_invested, 2):,.2f} USD</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        st.write('---')
+
+        # --- 7. Historický Graf (Line Chart) ---
+        
+        st.subheader('Historický vývoj portfolia')
+        
+        period = st.select_slider(
+            'Vyberte časový horizont grafu:',
+            options=['3m', '6m', '1y', '2y', '5y', 'max'],
+            value='1y'
+        )
+
+        today = datetime.now()
+        delta_map = {'3m': 90, '6m': 180, '1y': 365, '2y': 365*2, '5y': 365*5, 'max': 365*10}
+        days = delta_map.get(period, 365)
+        start_date = today - pd.Timedelta(days=days)
+        end_date = today
+
+        with st.spinner(f'Načítám historická data pro {period}...'):
+            symbols_hist = [s for s in positions_df['Název'].unique()]
+            hist_prices = get_historical_prices(symbols_hist, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
+            
+            portfolio_history = pd.DataFrame(index=pd.to_datetime(pd.date_range(start=start_date, end=end_date)))
+            
+            for symbol in symbols_hist:
+                pos_data = positions_df[positions_df['Název'] == symbol]
+                if pos_data.empty: continue
+                
+                pos = pos_data.iloc[0]
+                qty = pos['Množství']
+                if qty == 0: continue
+                
+                if symbol in hist_prices and not hist_prices[symbol].empty:
+                    prices = hist_prices[symbol]
+                    prices.index = prices.index.tz_localize(None)
+                    prices = prices.reindex(portfolio_history.index, method='ffill')
+                    portfolio_history[symbol] = prices * qty
+            
+            portfolio_history['Celková hodnota'] = portfolio_history.sum(axis=1).replace(0, np.nan).fillna(method='ffill')
+            
+            if not portfolio_history.empty and 'Celková hodnota' in portfolio_history.columns:
+                
+                fig_hist = px.line(
+                    portfolio_history.reset_index(), 
+                    x='index', 
+                    y='Celková hodnota', 
+                    title='Historický vývoj hodnoty portfolia',
+                    labels={'index': 'Datum', 'Celková hodnota': 'Hodnota (USD)'},
+                    template='plotly_dark' 
+                )
+                
+                PLOTLY_BG_COLOR = '#000000' 
+                fig_hist.update_layout(
+                    plot_bgcolor=PLOTLY_BG_COLOR,
+                    paper_bgcolor=PLOTLY_BG_COLOR,
+                    font=dict(color="#fafafa"),
+                    margin=dict(t=50, b=50, l=50, r=50) 
+                )
+                
+                st.plotly_chart(fig_hist, use_container_width=True)
+            else:
+                 st.warning("Historická data pro graf nebyla nalezena pro všechny pozice.")
+        
+        st.write('---')
+
+        # --- 8. Koláčové grafy rozložení portfolia (Donut Charts) ---
+        
+        st.subheader('Rozložení Portfolia')
+        
+        def categorize_asset(symbol):
+            symbol_upper = symbol.upper()
+            if symbol_upper.endswith('.UK') or symbol_upper.endswith('.DE') or symbol_upper.endswith('.IT') or 'CSPX' in symbol_upper or 'CNDX' in symbol_upper:
+                return 'ETF / Akcie EU' 
+            else:
+                return 'Akcie (US/Jiné)'
+
+        positions_df['Kategorie'] = positions_df['Název'].apply(categorize_asset)
+        
+        allocation_df = positions_df.groupby('Kategorie')['Velikost pozice (USD)'].sum().reset_index()
+        allocation_df = allocation_df[allocation_df['Velikost pozice (USD)'] > 0]
+        
+        col_pie_1, col_pie_2 = st.columns(2)
+        
+        with col_pie_1:
+            if not allocation_df.empty:
+                fig_allocation = px.pie(
+                    allocation_df,
+                    values='Velikost pozice (USD)',
+                    names='Kategorie',
+                    title='**Alokace: ETF vs. Akcie**',
+                    template='plotly_dark' 
+                )
+                
+                fig_allocation.update_traces(
+                    textposition='inside', 
+                    textinfo='percent+label', 
+                    hole=.4 
+                )
+                
+                PLOTLY_BG_COLOR = '#000000'
+                fig_allocation.update_layout(
+                    plot_bgcolor=PLOTLY_BG_COLOR,
+                    paper_bgcolor=PLOTLY_BG_COLOR,
+                    font=dict(color="#fafafa"),
+                    showlegend=True, 
+                    margin=dict(t=30, b=0, l=0, r=0)
+                )
+                
+                st.plotly_chart(fig_allocation, use_container_width=True)
+            else:
+                st.info('Pro zobrazení alokačního grafu musíte mít otevřené pozice.')
+                
+        with col_pie_2:
+            pie_data = positions_df[positions_df['Velikost pozice (USD)'] > 0]
+            
+            if not pie_data.empty:
+                fig_ticker = px.pie(
+                    pie_data,
+                    values='Velikost pozice (USD)',
+                    names='Název',
+                    title='**Rozdělení podle Tickeru**',
+                    hover_data=['Velikost pozice (USD)', 'Nerealizovaný % Zisk'],
+                    template='plotly_dark' 
+                )
+                
+                fig_ticker.update_traces(
+                    textposition='inside', 
+                    textinfo='percent+label', 
+                    hole=.4 
+                )
+                
+                PLOTLY_BG_COLOR = '#000000'
+                fig_ticker.update_layout(
+                    plot_bgcolor=PLOTLY_BG_COLOR,
+                    paper_bgcolor=PLOTLY_BG_COLOR,
+                    font=dict(color="#fafafa"),
+                    showlegend=True, 
+                    margin=dict(t=30, b=0, l=0, r=0)
+                )
+                
+                st.plotly_chart(fig_ticker, use_container_width=True)
+            else:
+                pass
+            
+        st.write('---')
+
+        # --- 9. Tabulka s finálními hodnotami a manuální korekcí ---
+        
+        st.subheader('Přepočítané Otevřené Pozice (Finální Přehled)')
+        
+        final_df = positions_df.drop(columns=['Náklad pozice (USD)']).copy()
+
+        st.dataframe(final_df.style.format({
+            'Množství': '{:.4f}',
+            'Průměrná cena (USD)': '{:.2f}',
+            'Aktuální cena (USD)': '{:.2f}',
+            'Velikost pozice (USD)': '{:,.2f}',
+            'Nerealizovaný Zisk (USD)': '{:,.2f}',
+            '% v portfoliu': '{:.2f}%',
+            'Nerealizovaný % Zisk': '{:.2f}%'
+        }))
+
+        # ====================================================================
+        # === MANUÁLNÍ KOREKCE ===============================================
+        # ====================================================================
+        
+        st.header('Manuální Korekce Aktuálních Cen')
+        st.warning('Tato tabulka slouží k manuální úpravě aktuální ceny (např. pokud data nefungují). Změna se projeví po kliknutí na "Trackuj Portfolio".')
+
+        editable_df = positions_df[['Název', 'Aktuální cena (USD)']].copy()
+        editable_df.rename(columns={'Aktuální cena (USD)': 'Aktuální cena (USD) - Manuální úprava'}, inplace=True)
+        
+        search_term = st.text_input("Filtruj tabulku podle názvu akcie:", value="")
+        if search_term:
+            editable_df_filtered = editable_df[editable_df['Název'].str.contains(search_term, case=False, na=False)]
+        else:
+            editable_df_filtered = editable_df
+
         edited_data = st.data_editor(
             editable_df_filtered,
             hide_index=True,
@@ -339,20 +636,16 @@ def main_app():
             num_rows="dynamic"
         )
         
-        # Uložení úprav do session_state pro další přepočet
         if edited_data is not None:
-            # Vytvoření slovníku pro snadné mapování (Název -> Nová Cena)
             price_updates = edited_data.set_index('Název')['Aktuální cena (USD) - Manuální úprava'].to_dict()
             
-            # Aplikace změn pouze u těch, které byly editovány
-            for index, row in st.session_state['positions_df'].iterrows():
-                new_price = price_updates.get(row['Název'])
-                if new_price is not None and new_price != row['Aktuální cena (USD)']:
-                    st.session_state['positions_df'].loc[index, 'Aktuální cena (USD)'] = new_price
+            st.session_state['positions_df']['Aktuální cena (USD)'] = st.session_state['positions_df'].apply(
+                lambda row: price_updates.get(row['Název'], row['Aktuální cena (USD)']), 
+                axis=1
+            )
             
-            st.success("Manuální úpravy byly uloženy. Pro přepočet klikněte na 'Rerun' v pravém horním rohu.")
-            st.session_state['positions_df'] = aggregate_positions(st.session_state['original_df'], current_prices)
-
+            st.success("Manuální úpravy byly uloženy. Pro zobrazení nového přehledu **musíte znovu kliknout na 'Trackuj Portfolio a Získej Aktuální Data'.**")
+            
 
 if __name__ == "__main__":
     main_app()
