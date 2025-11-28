@@ -166,21 +166,12 @@ st.markdown("""
 def get_ticker_and_currency(symbol):
     symbol_upper = symbol.upper()
     
-    # 1. Explicitní fixy pro ETF
     if symbol_upper == 'CSPX.UK' or symbol_upper == 'CSPX':
         return 'CSPX.L', 'USD' 
     if symbol_upper == 'CNDX.UK' or symbol_upper == 'CNDX':
         return 'CNDX.L', 'USD' 
-        
-    # OPRAVA 1: TUI
-    if symbol_upper == 'TUI.DE': 
-        return 'TUI.DE', 'EUR' 
-
-    # OPRAVA 2: STLAM.IT (Stellantis)
-    if symbol_upper == 'STLAM.IT':
-        return 'STLA.MI', 'EUR' 
-        
-    # 2. Generická pravidla
+    if 'TUI' in symbol_upper and symbol_upper.endswith('.DE'):
+        return 'TUI1.DE', 'EUR'
     elif symbol_upper.endswith('.US'):
         return symbol_upper[:-3], 'USD'
     elif symbol_upper.endswith('.DE'):
@@ -189,8 +180,6 @@ def get_ticker_and_currency(symbol):
         return symbol_upper[:-3] + '.MI', 'EUR'
     elif symbol_upper.endswith('.UK'):
         return symbol_upper[:-3] + '.L', 'GBP' 
-        
-    # 3. Výchozí hodnota
     return symbol, 'USD'
 
 # Funkce pro stažení aktuálních cen (batch processing + Caching)
@@ -449,10 +438,9 @@ if uploaded_file is not None:
         edited_df['Nerealizovaný Zisk (USD)'] = (edited_df['Aktuální cena (USD)'] - edited_df['Průměrná cena (USD)']) * edited_df['Množství']
         edited_df['Nerealizovaný % Zisk'] = (edited_df['Nerealizovaný Zisk (USD)'] / edited_df['Náklad pozice (USD)'] * 100).fillna(0)
         
-        # OPRAVENÝ VÝPOČET: Hodnota portfolia = Investovaná částka + Nerealizovaný zisk
+        total_portfolio_value = edited_df['Velikost pozice (USD)'].sum()
         unrealized_profit = edited_df['Nerealizovaný Zisk (USD)'].sum()
         total_invested = st.session_state['total_invested']
-        total_portfolio_value = total_invested + unrealized_profit # <-- OPRAVA APLIKOVÁNA
         
         unrealized_profit_pct = (unrealized_profit / total_invested * 100) if total_invested > 0 else 0
         
@@ -505,11 +493,11 @@ if uploaded_file is not None:
         
         # Box 4: CELKOVÁ HODNOTA (Portfolio + Dividendy)
         with col4:
-            total_value_with_dividends = total_portfolio_value + total_dividends
+            total_value_with_profit = total_portfolio_value + total_dividends
             st.markdown(f"""
             <div class="custom-card">
                 <div class="card-title">CELKOVÁ HODNOTA (Portfolio + Dividendy)</div>
-                <p class="card-value value-neutral">{round(total_value_with_dividends, 2):,.2f} USD</p>
+                <p class="card-value value-neutral">{round(total_value_with_profit, 2):,.2f} USD</p>
             </div>
             """, unsafe_allow_html=True)
 
@@ -561,7 +549,6 @@ if uploaded_file is not None:
                     prices = prices.reindex(portfolio_history.index, method='ffill')
                     portfolio_history[symbol] = prices * qty
             
-            # Celková hodnota v grafu je stále počítána jako tržní hodnota, aby byl vidět vývoj cen
             portfolio_history['Celková hodnota'] = portfolio_history.sum(axis=1).replace(0, np.nan).fillna(method='ffill')
             
             if not portfolio_history.empty and 'Celková hodnota' in portfolio_history.columns:
@@ -570,7 +557,7 @@ if uploaded_file is not None:
                     portfolio_history.reset_index(), 
                     x='index', 
                     y='Celková hodnota', 
-                    title='Historický vývoj hodnoty portfolia (Tržní hodnota)',
+                    title='Historický vývoj hodnoty portfolia',
                     labels={'index': 'Datum', 'Celková hodnota': 'Hodnota (USD)'},
                     template='plotly_dark' 
                 )
@@ -598,8 +585,11 @@ if uploaded_file is not None:
         
         def categorize_asset(symbol):
             symbol_upper = symbol.upper()
-            if symbol_upper.endswith('.UK') or symbol_upper.endswith('.DE') or symbol_upper.endswith('.IT') or 'CSPX' in symbol_upper or 'CNDX' in symbol_upper:
-                return 'ETF / Akcie EU' 
+            # Explicitně identifikujeme ETF (CSPX, CNDX), zbytek s evropskou koncovkou budou Akcie EU.
+            if 'CSPX' in symbol_upper or 'CNDX' in symbol_upper:
+                return 'ETF (EU)' 
+            elif symbol_upper.endswith('.UK') or symbol_upper.endswith('.DE') or symbol_upper.endswith('.IT'):
+                return 'Akcie (EU)' # Sem spadne TUI a Stellantis
             else:
                 return 'Akcie (US/Jiné)'
 
