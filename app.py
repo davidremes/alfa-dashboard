@@ -200,6 +200,7 @@ def get_ticker_and_currency(symbol):
     elif symbol_upper.endswith('.IT'):
         return symbol_upper[:-3] + '.MI', 'EUR'
     elif symbol_upper.endswith('.UK'):
+        # Použijeme LSE kód pro yfinance
         return symbol_upper[:-3] + '.L', 'GBP' 
         
     # 3. Výchozí hodnota
@@ -269,14 +270,23 @@ def calculate_positions(transactions):
         transaction_type = row['Type']
         if symbol not in positions:
             positions[symbol] = {'quantity': 0, 'total_cost': 0}
+        
+        # Sčítáme nákupní hodnoty a množství pro průměrování
         if 'BUY' in transaction_type.upper():
             positions[symbol]['quantity'] += quantity
             positions[symbol]['total_cost'] += purchase_value
+            
+        # Potřebujeme odečíst prodej, ale XTB report dává jen nákupní transakce
+        # Pro zjednodušení teď pracujeme pouze s nákupy a očekáváme uzavřené pozice
+        # v jiném listu (df_closed)
+            
     for symbol in positions:
         if positions[symbol]['quantity'] > 0:
             positions[symbol]['avg_price'] = positions[symbol]['total_cost'] / positions[symbol]['quantity']
         else:
             positions[symbol]['avg_price'] = 0
+            
+    # Filtrujeme pouze aktivní pozice (s množstvím > 0)
     return {k: v for k, v in positions.items() if v['quantity'] > 0} 
 
 # Historická data (s cachingem)
@@ -409,7 +419,8 @@ if uploaded_file is not None:
                 # VÝPOČET DIVIDEND
                 if 'Type' in df_cash.columns and 'Amount' in df_cash.columns:
                     dividends_df = df_cash[df_cash['Type'].astype(str).str.upper().str.contains('DIVIDENT', na=False)]
-                    total_dividends = dividends_df['Amount'].sum() if not dividends_df.empty else 0
+                    # Potřebujeme jen ty dividendy, které byly připsány (kladná hodnota)
+                    total_dividends = dividends_df[dividends_df['Amount'] > 0]['Amount'].sum() if not dividends_df.empty else 0
                 else:
                     total_dividends = 0
                 
@@ -467,17 +478,22 @@ if uploaded_file is not None:
         total_dividends = st.session_state['total_dividends'] 
         realized_profit = st.session_state['realized_profit'] # Načtení realizovaného zisku
 
-        # Původní logika pro ošetření nulových cen
+        # VÝPOČET HODNOT POZIC
         edited_df['Velikost pozice (USD)'] = edited_df['Množství'] * edited_df['Aktuální cena (USD)']
-        edited_df['Nerealizovaný Zisk (USD)'] = (edited_df['Aktuální cena (USD)'] - edited_df['Průměrná cena (USD)']) * edited_df['Množství']
+        
+        # VÝPOČET NEREALIZOVANÉHO ZISKU (Pravděpodobně zde byla chyba: P/L = (Aktuální hodnota - Náklad) )
+        edited_df['Nerealizovaný Zisk (USD)'] = edited_df['Velikost pozice (USD)'] - edited_df['Náklad pozice (USD)']
         
         # Nerealizovaný % zisk
         def calculate_pct_profit(row):
-            if row['Náklad pozice (USD)'] == 0:
+            cost = row['Náklad pozice (USD)']
+            if cost == 0:
                 return 0.0
+            # Pokud je aktuální hodnota 0, zisk je -100%
             if row['Aktuální cena (USD)'] == 0.0:
                  return -100.0
-            return (row['Nerealizovaný Zisk (USD)'] / row['Náklad pozice (USD)'] * 100)
+            # P/L % = (Zisk / Náklad) * 100
+            return (row['Nerealizovaný Zisk (USD)'] / cost * 100)
 
         edited_df['Nerealizovaný % Zisk'] = edited_df.apply(calculate_pct_profit, axis=1)
 
@@ -505,7 +521,7 @@ if uploaded_file is not None:
             <div class="custom-card main-card">
                 <div class="card-title">HODNOTA PORTFOLIA</div>
                 <p class="main-card-value">{round(total_portfolio_value, 2):,.2f} USD</p>
-                <p style="font-size:12px; margin-top:5px; color:#fafafa;">K {datetime.now().strftime('%d. %m. %Y')}</p>
+                <p style="font-size:12px; margin-top:5px; color:#fafafa;">Aktuální tržní hodnota</p>
             </div>
             """, unsafe_allow_html=True)
             
@@ -516,7 +532,7 @@ if uploaded_file is not None:
             <div class="custom-card">
                 <div class="card-title">REALIZOVANÝ ZISK</div>
                 <p class="card-value {val_class}">{round(realized_profit, 2):,.2f} USD</p>
-                <p style="font-size:12px; color:#999999;">Uzavřené pozice</p>
+                <p style="font-size:12px; color:#999999;">Uzavřené pozice (P/L)</p>
             </div>
             """, unsafe_allow_html=True)
 
@@ -538,26 +554,25 @@ if uploaded_file is not None:
             <div class="custom-card">
                 <div class="card-title">CELKEM VYPLACENÉ DIVIDENDY</div>
                 <p class="card-value {val_class}">{round(total_dividends, 2):,.2f} USD</p>
-                <p style="font-size:12px; color:#999999;">Od počátku reportu</p>
+                <p style="font-size:12px; color:#999999;">Připsané dividendy (Gross)</p>
             </div>
             """, unsafe_allow_html=True)
         
-        # Druhý řádek: CELKOVÁ HODNOTA ÚČTU (správně) a INVESTOVANÁ ČÁSTKA
+        # Druhý řádek: CELKOVÝ ČISTÝ ZISK a INVESTOVANÁ ČÁSTKA
         
-        # NOVÁ SPRÁVNÁ METRIKA: CELKOVÁ HODNOTA ÚČTU (Total Equity)
-        # = Hodnota portfolia (otevřené pozice) + Realizovaný zisk + Dividendy + (Případná hotovost, která zde není zahrnuta)
-        total_account_value = total_portfolio_value + realized_profit + total_dividends
+        # OPRAVENÁ METRIKA: CELKOVÝ ČISTÝ ZISK (P&L celkem)
+        total_profit = unrealized_profit + realized_profit + total_dividends
         
         col5, col6 = st.columns(2)
         
-        # Box 5: CELKOVÁ HODNOTA ÚČTU (Nahrazuje původní chybné/duplicitní zobrazení)
+        # Box 5: CELKOVÝ ČISTÝ ZISK (Klíčová metrika - Kolik jste celkem vydělal/ztratil)
         with col5:
-            val_class = "value-neutral" 
+            val_class = "value-positive" if total_profit >= 0 else "value-negative"
             st.markdown(f"""
             <div class="custom-card">
-                <div class="card-title">CELKOVÁ HODNOTA ÚČTU (Equity Value)</div>
-                <p class="card-value {val_class}">{round(total_account_value, 2):,.2f} USD</p>
-                <p style="font-size:12px; color:#999999;">Portfolio + Realizovaný Zisk + Dividendy</p>
+                <div class="card-title">CELKOVÝ ČISTÝ ZISK (P&L)</div>
+                <p class="card-value {val_class}">{round(total_profit, 2):,.2f} USD</p>
+                <p style="font-size:12px; color:#999999;">Nerealizovaný + Realizovaný + Dividendy</p>
             </div>
             """, unsafe_allow_html=True)
 
@@ -565,7 +580,7 @@ if uploaded_file is not None:
         with col6:
             st.markdown(f"""
             <div class="custom-card">
-                <div class="card-title">INVESTOVANÁ ČÁSTKA (Total Cost Basis)</div>
+                <div class="card-title">INVESTOVANÁ ČÁSTKA (Cost Basis)</div>
                 <p class="card-value value-neutral">{round(total_invested, 2):,.2f} USD</p>
                 <p style="font-size:12px; color:#999999;">Náklady na otevřené pozice</p>
             </div>
