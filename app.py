@@ -160,22 +160,11 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# --- 2. FUNKCE PRO ZÍSKÁNÍ DAT ---
+# --- 2. FUNKCE PRO ZÍSKÁNÍ DAT (PŮVODNÍ, FUNKČNÍ LOGIKA) ---
 
 # Funkce pro mapování XTB symbolů na yfinance tickery a měny
 def get_ticker_and_currency(symbol):
-    # Převod na velká písmena a náhrada čárek za tečky (robustnější čtení z XTB reportu)
-    symbol_upper = symbol.upper().replace(',', '.') 
-    
-    # === 1. NEJTVRDŠÍ PRAVIDLA PRO GOOGLE/ALPHABET (MUSÍ MÍT PRIORITU) ===
-    # Tím, že to je nahoře, má to prioritu před generickým .US.
-    if symbol_upper.startswith('GOOGL'):
-        # Vezme GOOGL.US a vrátí GOOGL. Ticker na yfinance je GOOGL (Class C)
-        return 'GOOGL', 'USD' 
-    if symbol_upper.startswith('GOOG') and symbol_upper != 'GOOGLE': 
-        # Ticker na yfinance je GOOG (Class A)
-        return 'GOOG', 'USD'
-    # =====================================================================
+    symbol_upper = symbol.upper()
     
     if symbol_upper == 'CSPX.UK' or symbol_upper == 'CSPX':
         return 'CSPX.L', 'USD' 
@@ -184,7 +173,6 @@ def get_ticker_and_currency(symbol):
     if 'TUI' in symbol_upper and symbol_upper.endswith('.DE'):
         return 'TUI1.DE', 'EUR'
     elif symbol_upper.endswith('.US'):
-        # Použijeme symbol bez přípony .US
         return symbol_upper[:-3], 'USD'
     elif symbol_upper.endswith('.DE'):
         return symbol_upper[:-3] + '.DE', 'EUR'
@@ -192,13 +180,10 @@ def get_ticker_and_currency(symbol):
         return symbol_upper[:-3] + '.MI', 'EUR'
     elif symbol_upper.endswith('.UK'):
         return symbol_upper[:-3] + '.L', 'GBP' 
-        
-    return symbol_upper, 'USD'
-
+    return symbol, 'USD'
 
 # Funkce pro stažení aktuálních cen (batch processing + Caching)
-# POZNÁMKA: Nastavení ttl=0 vynucuje stažení při každém spuštění aplikace (i když to může být pomalé)
-@st.cache_data(ttl=600) 
+@st.cache_data(ttl=600)
 def get_current_prices(symbols):
     if not symbols:
         return {}
@@ -233,22 +218,20 @@ def get_current_prices(symbols):
             price = data.iloc[-1]
             for symbol, (t, curr) in ticker_map.items():
                 if t == ticker:
-                    # Pokud Yahoo nevrátí cenu, price bude NaN. Zde používáme np.nan. 
-                    prices[symbol] = price * currency_rates.get(curr, 1.0) if pd.notna(price) else 0.0
+                    prices[symbol] = price * currency_rates.get(curr, 1.0)
                     break
         else: 
             for symbol, (ticker, currency) in ticker_map.items():
                 try:
                     price = data[ticker].iloc[-1]
-                    prices[symbol] = price * currency_rates.get(currency, 1.0) if pd.notna(price) else 0.0
+                    prices[symbol] = price * currency_rates.get(currency, 1.0)
                 except (KeyError, IndexError):
-                    prices[symbol] = 0.0
+                    prices[symbol] = 0
     except:
         st.error("Nepodařilo se stáhnout ceny pro jeden nebo více symbolů (pravděpodobně chyba Yahoo Finance). Používám 0 pro chybějící data.")
         for symbol in symbols:
-             prices[symbol] = 0.0
+             prices[symbol] = 0
              
-    # Vracíme dictionary cen (pokud yfinance selže, cena je 0.0)
     return prices
 
 # Funkce pro výpočet otevřených pozic (statická data z reportu)
@@ -270,10 +253,9 @@ def calculate_positions(transactions):
             positions[symbol]['avg_price'] = positions[symbol]['total_cost'] / positions[symbol]['quantity']
         else:
             positions[symbol]['avg_price'] = 0
-    # OPRAVENÁ SYNTAXE
     return {k: v for k, v in positions.items() if v['quantity'] > 0} 
 
-# Historická data (s cachingem)
+# Historická data (s cachingem) - PŮVODNÍ, FUNKČNÍ LOGIKA
 @st.cache_data(ttl=3600)
 def get_historical_prices(symbols, start_date, end_date):
     hist_prices = {}
@@ -319,8 +301,8 @@ st.info('Nahraj Excel/CSV report z XTB. Všechny hodnoty jsou automaticky převe
 uploaded_file = st.file_uploader('Nahraj CSV nebo Excel report z XTB', type=['csv', 'xlsx'])
 
 df_open = pd.DataFrame()
-df_closed = pd.DataFrame() 
-df_cash = pd.DataFrame() 
+df_closed = pd.DataFrame() # Bude sice stále načten pro kompatibilitu, ale nepoužit pro zisk
+df_cash = pd.DataFrame() # Nový DataFrame pro hotovostní operace (dividendy)
 
 # Načítání souboru
 if uploaded_file is not None:
@@ -330,42 +312,42 @@ if uploaded_file is not None:
             sheets = excel.sheet_names
             open_sheet = next((s for s in sheets if 'OPEN POSITION' in s.upper()), None)
             closed_sheet = next((s for s in sheets if 'CLOSED POSITION' in s.upper()), None)
+            # NOVÝ SHEET pro hotovostní operace
             cash_sheet = next((s for s in sheets if 'CASH OPERATION' in s.upper()), None)
             
             # --- Robustní hledání hlaviček ---
             
-            # OPEN POSITION
             if open_sheet:
-                df_full = pd.read_excel(uploaded_file, sheet_name=open_sheet, header=None, engine='openpyxl')
+                df_full = pd.read_excel(uploaded_file, sheet_name=open_sheet, header=None)
                 header_index = df_full[df_full.iloc[:, 0].astype(str) == 'Position'].index.min()
                 if not pd.isna(header_index):
-                    df_open = pd.read_excel(uploaded_file, sheet_name=open_sheet, header=header_index, engine='openpyxl').dropna(how='all')
+                    df_open = pd.read_excel(uploaded_file, sheet_name=open_sheet, header=header_index).dropna(how='all')
                 else:
-                    df_open = pd.read_excel(uploaded_file, sheet_name=open_sheet, header=10, engine='openpyxl').dropna(how='all')
+                    df_open = pd.read_excel(uploaded_file, sheet_name=open_sheet, header=10).dropna(how='all')
             
-            # CLOSED POSITION
             if closed_sheet:
-                df_full_closed = pd.read_excel(uploaded_file, sheet_name=closed_sheet, header=None, engine='openpyxl')
+                df_full_closed = pd.read_excel(uploaded_file, sheet_name=closed_sheet, header=None)
                 header_index_closed = df_full_closed[df_full_closed.iloc[:, 0].astype(str) == 'Position'].index.min()
                 if not pd.isna(header_index_closed):
-                    df_closed = pd.read_excel(uploaded_file, sheet_name=closed_sheet, header=header_index_closed, engine='openpyxl').dropna(how='all')
+                    df_closed = pd.read_excel(uploaded_file, sheet_name=closed_sheet, header=header_index_closed).dropna(how='all')
                 else:
-                    df_closed = pd.read_excel(uploaded_file, sheet_name=closed_sheet, header=9, engine='openpyxl').dropna(how='all')
+                    df_closed = pd.read_excel(uploaded_file, sheet_name=closed_sheet, header=9).dropna(how='all')
             
-            # CASH OPERATION HISTORY
+            # NAČTENÍ CASH OPERATION HISTORY
             if cash_sheet:
-                 df_full_cash = pd.read_excel(uploaded_file, sheet_name=cash_sheet, header=None, engine='openpyxl')
+                 df_full_cash = pd.read_excel(uploaded_file, sheet_name=cash_sheet, header=None)
+                 # Hledání hlavičky 'ID' - předpokládáme 10 řádek nad "ID"
                  header_index_cash = df_full_cash[df_full_cash.iloc[:, 1].astype(str) == 'ID'].index.min()
                  if not pd.isna(header_index_cash):
-                     df_cash = pd.read_excel(uploaded_file, sheet_name=cash_sheet, header=header_index_cash, engine='openpyxl').dropna(how='all')
+                     df_cash = pd.read_excel(uploaded_file, sheet_name=cash_sheet, header=header_index_cash).dropna(how='all')
                  else:
-                     df_cash = pd.read_excel(uploaded_file, sheet_name=cash_sheet, header=10, engine='openpyxl').dropna(how='all')
+                     df_cash = pd.read_excel(uploaded_file, sheet_name=cash_sheet, header=10).dropna(how='all')
                  st.success("Načtena historie hotovostních operací (pro dividendy).")
 
         else: # HANDLING CSV FILES
-            # Zjednodušená detekce pro CSV
             df_temp = pd.read_csv(uploaded_file, header=10).dropna(how='all')
             
+            # Zjednodušená detekce pro CSV
             if 'Gross P/L' in df_temp.columns and 'Position' in df_temp.columns:
                 df_closed = df_temp
                 st.success("Načten CSV soubor: Uzavřené pozice.")
@@ -395,14 +377,15 @@ if uploaded_file is not None:
         
         # --- 4. Inicializace, stažení dat a přepočet ---
         
-        # Kontrola, zda je potřeba znovu stáhnout data (změněn soubor nebo první spuštění)
         if 'positions_df' not in st.session_state or st.session_state.get('uploaded_file_name') != uploaded_file.name:
             with st.spinner('Počítám metriky a stahuji data z Yahoo Finance...'):
                 positions = calculate_positions(df_open)
                 
                 # VÝPOČET DIVIDEND
                 if 'Type' in df_cash.columns and 'Amount' in df_cash.columns:
+                    # Filter for 'DIVIDENT' type and sum the 'Amount' column
                     dividends_df = df_cash[df_cash['Type'].astype(str).str.upper().str.contains('DIVIDENT', na=False)]
+                    # Suma je v USD, protože report je v USD
                     total_dividends = dividends_df['Amount'].sum() if not dividends_df.empty else 0
                 else:
                     total_dividends = 0
@@ -414,7 +397,6 @@ if uploaded_file is not None:
                     st.session_state['total_dividends'] = 0 
                 else:
                     symbols = list(positions.keys())
-                    # Zde se zavolá get_current_prices se správným mapováním GOOGL.US -> GOOGL
                     current_prices = get_current_prices(symbols)
 
                     table_data = []
@@ -423,8 +405,7 @@ if uploaded_file is not None:
                     for symbol, pos in positions.items():
                         qty = pos['quantity']
                         avg_price = pos['avg_price']
-                        # Získání ceny, která je 0.0, pokud selhala yfinance
-                        current_price = current_prices.get(symbol, 0.0) 
+                        current_price = current_prices.get(symbol, 0)
                         
                         table_data.append({
                             'Název': symbol, 'Množství': qty, 
@@ -453,28 +434,10 @@ if uploaded_file is not None:
         edited_df = st.session_state['positions_df'].copy()
         total_dividends = st.session_state['total_dividends'] # Načtení dividend
 
-        # Před výpočtem nulujeme nuly pro bezpečnější výpočet
-        edited_df['Aktuální cena (USD)'] = edited_df['Aktuální cena (USD)'].replace(0.0, 0.01)
-
         edited_df['Velikost pozice (USD)'] = edited_df['Množství'] * edited_df['Aktuální cena (USD)']
         edited_df['Nerealizovaný Zisk (USD)'] = (edited_df['Aktuální cena (USD)'] - edited_df['Průměrná cena (USD)']) * edited_df['Množství']
+        edited_df['Nerealizovaný % Zisk'] = (edited_df['Nerealizovaný Zisk (USD)'] / edited_df['Náklad pozice (USD)'] * 100).fillna(0)
         
-        # Zde nahradíme zpět 0.01 za 0.0 pro správné zobrazení, pokud byl problém s cenou
-        edited_df['Aktuální cena (USD)'] = edited_df['Aktuální cena (USD)'].replace(0.01, 0.0)
-        edited_df.loc[edited_df['Aktuální cena (USD)'] == 0.0, 'Velikost pozice (USD)'] = 0.0
-        edited_df.loc[edited_df['Aktuální cena (USD)'] == 0.0, 'Nerealizovaný Zisk (USD)'] = edited_df['Náklad pozice (USD)'] * -1
-
-        # Nerealizovaný % zisk musí počítat jen z platných nákladů
-        def calculate_pct_profit(row):
-            if row['Náklad pozice (USD)'] == 0:
-                return 0.0
-            # Pokud je aktuální cena 0, nastavíme % zisk na -100%
-            if row['Aktuální cena (USD)'] == 0.0:
-                 return -100.0
-            return (row['Nerealizovaný Zisk (USD)'] / row['Náklad pozice (USD)'] * 100)
-
-        edited_df['Nerealizovaný % Zisk'] = edited_df.apply(calculate_pct_profit, axis=1)
-
         total_portfolio_value = edited_df['Velikost pozice (USD)'].sum()
         unrealized_profit = edited_df['Nerealizovaný Zisk (USD)'].sum()
         total_invested = st.session_state['total_invested']
@@ -530,11 +493,13 @@ if uploaded_file is not None:
         
         # Box 4: CELKOVÁ HODNOTA (Portfolio + Dividendy)
         with col4:
-            total_value_with_profit = total_portfolio_value + unrealized_profit
+            # OPRAVA: Celková hodnota = Hodnota portfolia (Market Value, zahrnuje P/L) + Celkem přijaté dividendy.
+            # Proměnná přejmenována pro lepší čitelnost, výpočet je správný:
+            total_value_with_dividends = total_portfolio_value + total_dividends
             st.markdown(f"""
             <div class="custom-card">
                 <div class="card-title">CELKOVÁ HODNOTA (Portfolio + Dividendy)</div>
-                <p class="card-value value-neutral">{round(total_value_with_profit, 2):,.2f} USD</p>
+                <p class="card-value value-neutral">{round(total_value_with_dividends, 2):,.2f} USD</p>
             </div>
             """, unsafe_allow_html=True)
 
@@ -760,3 +725,5 @@ if uploaded_file is not None:
             )
             
             st.success("Manuální úpravy byly uloženy. Pro zobrazení nového přehledu **musíte znovu kliknout na 'Trackuj Portfolio a Získej Aktuální Data'.**")
+            
+        # ====================================================================
