@@ -5,8 +5,8 @@ from datetime import datetime
 import numpy as np
 import plotly.express as px
 import warnings 
-import json # Potřebujeme pro čtení mapy tickerů
-import os # Potřebujeme pro kontrolu existence souboru
+import json 
+import os 
 
 # Potlačení FutureWarnings (které často generuje yfinance)
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -181,6 +181,17 @@ st.markdown("""
 
 # --- 2. FUNKCE PRO ZÍSKÁNÍ DAT ---
 
+# Nová funkce pro bezpečnou konverzi na čísla (Float)
+def safe_to_numeric(series):
+    """
+    Pokusí se převést sérii na číselný typ (float). 
+    Případné chyby (text, prázdné buňky, NaN) nahradí nulou.
+    """
+    # Použijeme errors='coerce', které převede nečíselné hodnoty na NaN, 
+    # a následně NaN nahradíme 0.0
+    return pd.to_numeric(series, errors='coerce').fillna(0.0)
+
+
 # Funkce pro mapování XTB symbolů na yfinance tickery a měny
 def get_ticker_and_currency(symbol):
     # Převod na velká písmena a náhrada čárek za tečky
@@ -262,6 +273,9 @@ def get_current_prices(symbols):
 # Funkce pro výpočet otevřených pozic (statická data z reportu)
 def calculate_positions(transactions):
     positions = {}
+    # Před samotným výpočtem nákladů je nutné zajistit, že 'Purchase value' je numeric
+    transactions['Purchase value'] = safe_to_numeric(transactions['Purchase value'])
+    
     for _, row in transactions.iterrows():
         if pd.isna(row['Symbol']): continue
         symbol = row['Symbol']
@@ -276,10 +290,6 @@ def calculate_positions(transactions):
             positions[symbol]['quantity'] += quantity
             positions[symbol]['total_cost'] += purchase_value
             
-        # Potřebujeme odečíst prodej, ale XTB report dává jen nákupní transakce
-        # Pro zjednodušení teď pracujeme pouze s nákupy a očekáváme uzavřené pozice
-        # v jiném listu (df_closed)
-            
     for symbol in positions:
         if positions[symbol]['quantity'] > 0:
             positions[symbol]['avg_price'] = positions[symbol]['total_cost'] / positions[symbol]['quantity']
@@ -290,7 +300,6 @@ def calculate_positions(transactions):
     return {k: v for k, v in positions.items() if v['quantity'] > 0} 
 
 # Historická data (s cachingem)
-# Změna ttl na 86400 (24 hodin)
 @st.cache_data(ttl=86400) 
 def get_historical_prices(symbols, start_date, end_date):
     hist_prices = {}
@@ -416,26 +425,45 @@ if uploaded_file is not None:
             with st.spinner('Počítám metriky a stahuji data z Yahoo Finance...'):
                 positions = calculate_positions(df_open)
                 
-                # VÝPOČET DIVIDEND
+                # VÝPOČET DIVIDENDY (NET) - APLIKACE SAFE KONVERZE
                 if 'Type' in df_cash.columns and 'Amount' in df_cash.columns:
-                    dividends_df = df_cash[df_cash['Type'].astype(str).str.upper().str.contains('DIVIDENT', na=False)]
-                    # Potřebujeme jen ty dividendy, které byly připsány (kladná hodnota)
-                    total_dividends = dividends_df[dividends_df['Amount'] > 0]['Amount'].sum() if not dividends_df.empty else 0
+                    df_cash['Amount'] = safe_to_numeric(df_cash['Amount']) 
+                    
+                    dividends_and_tax_df = df_cash[
+                        df_cash['Type'].astype(str).str.upper().str.contains('DIVIDENT', na=False) |
+                        df_cash['Type'].astype(str).str.upper().str.contains('WITHHOLDING TAX', na=False)
+                    ]
+                    total_dividends = dividends_and_tax_df['Amount'].sum() if not dividends_and_tax_df.empty else 0
                 else:
                     total_dividends = 0
                 
-                # VÝPOČET REALIZOVANÉHO ZISKU
+                # VÝPOČET REALIZOVANÉHO ZISKU - APLIKACE SAFE KONVERZE
                 if 'Gross P/L' in df_closed.columns:
+                    df_closed['Gross P/L'] = safe_to_numeric(df_closed['Gross P/L'])
                     realized_profit = df_closed['Gross P/L'].sum()
                     st.session_state['realized_profit'] = realized_profit
                 else:
                     st.session_state['realized_profit'] = 0
                 
+                # VÝPOČET OTEVŘENÝCH POPLATKŮ (SWAP, KOMISE, ROLLOVER) - APLIKACE SAFE KONVERZE
+                if all(col in df_open.columns for col in ['Commission', 'Swap', 'Rollover']):
+                    df_open['Commission'] = safe_to_numeric(df_open['Commission'])
+                    df_open['Swap'] = safe_to_numeric(df_open['Swap'])
+                    df_open['Rollover'] = safe_to_numeric(df_open['Rollover'])
+                    
+                    open_fees = df_open['Commission'].sum() + df_open['Swap'].sum() + df_open['Rollover'].sum()
+                    st.session_state['open_fees'] = open_fees
+                    st.success(f"Započteny poplatky/swap (vstupní data): {round(open_fees, 2):.2f} USD")
+                else:
+                    st.session_state['open_fees'] = 0
+
+
                 if not positions:
                     st.warning('Žádné aktivní otevřené pozice nebyly nalezeny ve vstupních datech.')
                     st.session_state['positions_df'] = pd.DataFrame()
                     st.session_state['total_invested'] = 0
-                    st.session_state['total_dividends'] = 0 
+                    st.session_state['total_dividends'] = 0
+                    st.session_state['open_fees'] = 0 
                 else:
                     symbols = list(positions.keys())
                     # Zde se zavolá get_current_prices se správným mapováním z JSON
@@ -476,12 +504,13 @@ if uploaded_file is not None:
         
         edited_df = st.session_state['positions_df'].copy()
         total_dividends = st.session_state['total_dividends'] 
-        realized_profit = st.session_state['realized_profit'] # Načtení realizovaného zisku
+        realized_profit = st.session_state['realized_profit'] 
+        open_fees = st.session_state['open_fees'] 
 
         # VÝPOČET HODNOT POZIC
         edited_df['Velikost pozice (USD)'] = edited_df['Množství'] * edited_df['Aktuální cena (USD)']
         
-        # VÝPOČET NEREALIZOVANÉHO ZISKU (Pravděpodobně zde byla chyba: P/L = (Aktuální hodnota - Náklad) )
+        # VÝPOČET NEREALIZOVANÉHO ZISKU (P/L = Aktuální hodnota - Náklad)
         edited_df['Nerealizovaný Zisk (USD)'] = edited_df['Velikost pozice (USD)'] - edited_df['Náklad pozice (USD)']
         
         # Nerealizovaný % zisk
@@ -554,14 +583,14 @@ if uploaded_file is not None:
             <div class="custom-card">
                 <div class="card-title">CELKEM VYPLACENÉ DIVIDENDY</div>
                 <p class="card-value {val_class}">{round(total_dividends, 2):,.2f} USD</p>
-                <p style="font-size:12px; color:#999999;">Připsané dividendy (Gross)</p>
+                <p style="font-size:12px; color:#999999;">Připsané dividendy (Net, po zdanění)</p>
             </div>
             """, unsafe_allow_html=True)
         
         # Druhý řádek: CELKOVÝ ČISTÝ ZISK a INVESTOVANÁ ČÁSTKA
         
-        # OPRAVENÁ METRIKA: CELKOVÝ ČISTÝ ZISK (P&L celkem)
-        total_profit = unrealized_profit + realized_profit + total_dividends
+        # KONEČNÁ KALKULACE: Nerealizovaný + Realizovaný + Net Dividendy + Poplatky z otevřených pozic (záporné)
+        total_profit = unrealized_profit + realized_profit + total_dividends + open_fees
         
         col5, col6 = st.columns(2)
         
@@ -572,7 +601,7 @@ if uploaded_file is not None:
             <div class="custom-card">
                 <div class="card-title">CELKOVÝ ČISTÝ ZISK (P&L)</div>
                 <p class="card-value {val_class}">{round(total_profit, 2):,.2f} USD</p>
-                <p style="font-size:12px; color:#999999;">Nerealizovaný + Realizovaný + Dividendy</p>
+                <p style="font-size:12px; color:#999999;">Nerealizovaný (vč. poplatků) + Realizovaný + Dividendy (Net)</p>
             </div>
             """, unsafe_allow_html=True)
 
@@ -780,8 +809,10 @@ if uploaded_file is not None:
         
         # Uložení úprav do session_state pro další přepočet
         if edited_data is not None:
+            # Vytvoření slovníku pro snadné mapování (Název -> Nová Cena)
             price_updates = edited_data.set_index('Název')['Aktuální cena (USD) - Manuální úprava'].to_dict()
             
+            # Aplikace změn pouze u těch, které byly editovány
             st.session_state['positions_df']['Aktuální cena (USD)'] = st.session_state['positions_df'].apply(
                 lambda row: price_updates.get(row['Název'], row['Aktuální cena (USD)']), 
                 axis=1
