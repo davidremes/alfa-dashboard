@@ -325,7 +325,8 @@ if uploaded_file is not None:
             open_sheet = next((s for s in sheets if 'OPEN POSITION' in s.upper()), None)
             closed_sheet = next((s for s in sheets if 'CLOSED POSITION' in s.upper()), None)
             # NOVÝ SHEET pro hotovostní operace
-            cash_sheet = next((s for s for s in sheets if 'CASH OPERATION' in s.upper()), None)
+            # OPRAVA SYNTAXE (cash_sheet = next((s for s for s in sheets... na s for s in sheets...)
+            cash_sheet = next((s for s in sheets if 'CASH OPERATION' in s.upper()), None)
             
             # --- Robustní hledání hlaviček ---
             
