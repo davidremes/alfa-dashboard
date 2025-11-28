@@ -166,12 +166,22 @@ st.markdown("""
 def get_ticker_and_currency(symbol):
     symbol_upper = symbol.upper()
     
+    # 1. Explicitní fixy pro ETF
     if symbol_upper == 'CSPX.UK' or symbol_upper == 'CSPX':
         return 'CSPX.L', 'USD' 
     if symbol_upper == 'CNDX.UK' or symbol_upper == 'CNDX':
         return 'CNDX.L', 'USD' 
+        
+    # 2. Explicitní fixy pro problematičtější akcie
+    # OPRAVA TUI: Nyní používáme standardní YF ticker TUI.DE
     if 'TUI' in symbol_upper and symbol_upper.endswith('.DE'):
-        return 'TUI1.DE', 'EUR'
+        return 'TUI.DE', 'EUR' 
+
+    # OPRAVA STLAM.IT: XTB STLAM.IT se mapuje na YF STLA.MI (Stellantis)
+    if symbol_upper == 'STLAM.IT':
+        return 'STLA.MI', 'EUR' 
+
+    # 3. Generická pravidla
     elif symbol_upper.endswith('.US'):
         return symbol_upper[:-3], 'USD'
     elif symbol_upper.endswith('.DE'):
@@ -180,6 +190,8 @@ def get_ticker_and_currency(symbol):
         return symbol_upper[:-3] + '.MI', 'EUR'
     elif symbol_upper.endswith('.UK'):
         return symbol_upper[:-3] + '.L', 'GBP' 
+        
+    # 4. Výchozí hodnota
     return symbol, 'USD'
 
 # Funkce pro stažení aktuálních cen (batch processing + Caching)
@@ -313,7 +325,7 @@ if uploaded_file is not None:
             open_sheet = next((s for s in sheets if 'OPEN POSITION' in s.upper()), None)
             closed_sheet = next((s for s in sheets if 'CLOSED POSITION' in s.upper()), None)
             # NOVÝ SHEET pro hotovostní operace
-            cash_sheet = next((s for s in sheets if 'CASH OPERATION' in s.upper()), None)
+            cash_sheet = next((s for s for s in sheets if 'CASH OPERATION' in s.upper()), None)
             
             # --- Robustní hledání hlaviček ---
             
@@ -493,8 +505,7 @@ if uploaded_file is not None:
         
         # Box 4: CELKOVÁ HODNOTA (Portfolio + Dividendy)
         with col4:
-            # OPRAVA: Celková hodnota = Hodnota portfolia (Market Value, zahrnuje P/L) + Celkem přijaté dividendy.
-            # Proměnná přejmenována pro lepší čitelnost, výpočet je správný:
+            # OPRAVENO: Celková hodnota = Hodnota portfolia (Market Value) + Celkem přijaté dividendy.
             total_value_with_dividends = total_portfolio_value + total_dividends
             st.markdown(f"""
             <div class="custom-card">
