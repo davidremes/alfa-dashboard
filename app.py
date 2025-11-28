@@ -168,9 +168,12 @@ def get_ticker_and_currency(symbol):
     symbol_upper = symbol.upper().replace(',', '.') 
     
     # === 1. NEJTVRDŠÍ PRAVIDLA PRO GOOGLE/ALPHABET (MUSÍ MÍT PRIORITU) ===
+    # Tím, že to je nahoře, má to prioritu před generickým .US.
     if symbol_upper.startswith('GOOGL'):
+        # Vezme GOOGL.US a vrátí GOOGL. Ticker na yfinance je GOOGL (Class C)
         return 'GOOGL', 'USD' 
     if symbol_upper.startswith('GOOG') and symbol_upper != 'GOOGLE': 
+        # Ticker na yfinance je GOOG (Class A)
         return 'GOOG', 'USD'
     # =====================================================================
     
@@ -194,7 +197,8 @@ def get_ticker_and_currency(symbol):
 
 
 # Funkce pro stažení aktuálních cen (batch processing + Caching)
-@st.cache_data(ttl=600)
+# POZNÁMKA: Nastavení ttl=0 vynucuje stažení při každém spuštění aplikace (i když to může být pomalé)
+@st.cache_data(ttl=600) 
 def get_current_prices(symbols):
     if not symbols:
         return {}
@@ -229,20 +233,22 @@ def get_current_prices(symbols):
             price = data.iloc[-1]
             for symbol, (t, curr) in ticker_map.items():
                 if t == ticker:
-                    prices[symbol] = price * currency_rates.get(curr, 1.0)
+                    # Pokud Yahoo nevrátí cenu, price bude NaN. Zde používáme np.nan. 
+                    prices[symbol] = price * currency_rates.get(curr, 1.0) if pd.notna(price) else 0.0
                     break
         else: 
             for symbol, (ticker, currency) in ticker_map.items():
                 try:
                     price = data[ticker].iloc[-1]
-                    prices[symbol] = price * currency_rates.get(currency, 1.0)
+                    prices[symbol] = price * currency_rates.get(currency, 1.0) if pd.notna(price) else 0.0
                 except (KeyError, IndexError):
-                    prices[symbol] = 0
+                    prices[symbol] = 0.0
     except:
         st.error("Nepodařilo se stáhnout ceny pro jeden nebo více symbolů (pravděpodobně chyba Yahoo Finance). Používám 0 pro chybějící data.")
         for symbol in symbols:
-             prices[symbol] = 0
+             prices[symbol] = 0.0
              
+    # Vracíme dictionary cen (pokud yfinance selže, cena je 0.0)
     return prices
 
 # Funkce pro výpočet otevřených pozic (statická data z reportu)
@@ -389,6 +395,7 @@ if uploaded_file is not None:
         
         # --- 4. Inicializace, stažení dat a přepočet ---
         
+        # Kontrola, zda je potřeba znovu stáhnout data (změněn soubor nebo první spuštění)
         if 'positions_df' not in st.session_state or st.session_state.get('uploaded_file_name') != uploaded_file.name:
             with st.spinner('Počítám metriky a stahuji data z Yahoo Finance...'):
                 positions = calculate_positions(df_open)
@@ -407,6 +414,7 @@ if uploaded_file is not None:
                     st.session_state['total_dividends'] = 0 
                 else:
                     symbols = list(positions.keys())
+                    # Zde se zavolá get_current_prices se správným mapováním GOOGL.US -> GOOGL
                     current_prices = get_current_prices(symbols)
 
                     table_data = []
@@ -415,7 +423,8 @@ if uploaded_file is not None:
                     for symbol, pos in positions.items():
                         qty = pos['quantity']
                         avg_price = pos['avg_price']
-                        current_price = current_prices.get(symbol, 0)
+                        # Získání ceny, která je 0.0, pokud selhala yfinance
+                        current_price = current_prices.get(symbol, 0.0) 
                         
                         table_data.append({
                             'Název': symbol, 'Množství': qty, 
@@ -444,10 +453,28 @@ if uploaded_file is not None:
         edited_df = st.session_state['positions_df'].copy()
         total_dividends = st.session_state['total_dividends'] # Načtení dividend
 
+        # Před výpočtem nulujeme nuly pro bezpečnější výpočet
+        edited_df['Aktuální cena (USD)'] = edited_df['Aktuální cena (USD)'].replace(0.0, 0.01)
+
         edited_df['Velikost pozice (USD)'] = edited_df['Množství'] * edited_df['Aktuální cena (USD)']
         edited_df['Nerealizovaný Zisk (USD)'] = (edited_df['Aktuální cena (USD)'] - edited_df['Průměrná cena (USD)']) * edited_df['Množství']
-        edited_df['Nerealizovaný % Zisk'] = (edited_df['Nerealizovaný Zisk (USD)'] / edited_df['Náklad pozice (USD)'] * 100).fillna(0)
         
+        # Zde nahradíme zpět 0.01 za 0.0 pro správné zobrazení, pokud byl problém s cenou
+        edited_df['Aktuální cena (USD)'] = edited_df['Aktuální cena (USD)'].replace(0.01, 0.0)
+        edited_df.loc[edited_df['Aktuální cena (USD)'] == 0.0, 'Velikost pozice (USD)'] = 0.0
+        edited_df.loc[edited_df['Aktuální cena (USD)'] == 0.0, 'Nerealizovaný Zisk (USD)'] = edited_df['Náklad pozice (USD)'] * -1
+
+        # Nerealizovaný % zisk musí počítat jen z platných nákladů
+        def calculate_pct_profit(row):
+            if row['Náklad pozice (USD)'] == 0:
+                return 0.0
+            # Pokud je aktuální cena 0, nastavíme % zisk na -100%
+            if row['Aktuální cena (USD)'] == 0.0:
+                 return -100.0
+            return (row['Nerealizovaný Zisk (USD)'] / row['Náklad pozice (USD)'] * 100)
+
+        edited_df['Nerealizovaný % Zisk'] = edited_df.apply(calculate_pct_profit, axis=1)
+
         total_portfolio_value = edited_df['Velikost pozice (USD)'].sum()
         unrealized_profit = edited_df['Nerealizovaný Zisk (USD)'].sum()
         total_invested = st.session_state['total_invested']
@@ -503,7 +530,7 @@ if uploaded_file is not None:
         
         # Box 4: CELKOVÁ HODNOTA (Portfolio + Dividendy)
         with col4:
-            total_value_with_profit = total_portfolio_value + total_dividends
+            total_value_with_profit = total_portfolio_value + unrealized_profit
             st.markdown(f"""
             <div class="custom-card">
                 <div class="card-title">CELKOVÁ HODNOTA (Portfolio + Dividendy)</div>
