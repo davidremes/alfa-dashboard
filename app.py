@@ -172,16 +172,15 @@ def get_ticker_and_currency(symbol):
     if symbol_upper == 'CNDX.UK' or symbol_upper == 'CNDX':
         return 'CNDX.L', 'USD' 
         
-    # 2. Explicitní fixy pro problematičtější akcie
-    # OPRAVA TUI: Nyní používáme standardní YF ticker TUI.DE
-    if 'TUI' in symbol_upper and symbol_upper.endswith('.DE'):
+    # OPRAVA 1: TUI
+    if symbol_upper == 'TUI.DE': 
         return 'TUI.DE', 'EUR' 
 
-    # OPRAVA STLAM.IT: XTB STLAM.IT se mapuje na YF STLA.MI (Stellantis)
+    # OPRAVA 2: STLAM.IT (Stellantis)
     if symbol_upper == 'STLAM.IT':
         return 'STLA.MI', 'EUR' 
-
-    # 3. Generická pravidla
+        
+    # 2. Generická pravidla
     elif symbol_upper.endswith('.US'):
         return symbol_upper[:-3], 'USD'
     elif symbol_upper.endswith('.DE'):
@@ -191,7 +190,7 @@ def get_ticker_and_currency(symbol):
     elif symbol_upper.endswith('.UK'):
         return symbol_upper[:-3] + '.L', 'GBP' 
         
-    # 4. Výchozí hodnota
+    # 3. Výchozí hodnota
     return symbol, 'USD'
 
 # Funkce pro stažení aktuálních cen (batch processing + Caching)
@@ -325,7 +324,6 @@ if uploaded_file is not None:
             open_sheet = next((s for s in sheets if 'OPEN POSITION' in s.upper()), None)
             closed_sheet = next((s for s in sheets if 'CLOSED POSITION' in s.upper()), None)
             # NOVÝ SHEET pro hotovostní operace
-            # OPRAVA SYNTAXE: cash_sheet = next((s for s in sheets...
             cash_sheet = next((s for s in sheets if 'CASH OPERATION' in s.upper()), None)
             
             # --- Robustní hledání hlaviček ---
@@ -451,10 +449,10 @@ if uploaded_file is not None:
         edited_df['Nerealizovaný Zisk (USD)'] = (edited_df['Aktuální cena (USD)'] - edited_df['Průměrná cena (USD)']) * edited_df['Množství']
         edited_df['Nerealizovaný % Zisk'] = (edited_df['Nerealizovaný Zisk (USD)'] / edited_df['Náklad pozice (USD)'] * 100).fillna(0)
         
-        # OPRAVA ZDE: Hodnota portfolia = Investovaná částka + Nerealizovaný zisk
+        # OPRAVENÝ VÝPOČET: Hodnota portfolia = Investovaná částka + Nerealizovaný zisk
         unrealized_profit = edited_df['Nerealizovaný Zisk (USD)'].sum()
         total_invested = st.session_state['total_invested']
-        total_portfolio_value = total_invested + unrealized_profit # <-- ZMĚNA
+        total_portfolio_value = total_invested + unrealized_profit # <-- OPRAVA APLIKOVÁNA
         
         unrealized_profit_pct = (unrealized_profit / total_invested * 100) if total_invested > 0 else 0
         
@@ -507,7 +505,6 @@ if uploaded_file is not None:
         
         # Box 4: CELKOVÁ HODNOTA (Portfolio + Dividendy)
         with col4:
-            # Celková hodnota = Tržní hodnota portfolia + Celkem přijaté dividendy.
             total_value_with_dividends = total_portfolio_value + total_dividends
             st.markdown(f"""
             <div class="custom-card">
