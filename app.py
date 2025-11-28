@@ -160,20 +160,20 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# --- 2. FUNKCE PRO ZÍSKÁNÍ DAT (PŮVODNÍ, FUNKČNÍ LOGIKA) ---
+# --- 2. FUNKCE PRO ZÍSKÁNÍ DAT ---
 
 # Funkce pro mapování XTB symbolů na yfinance tickery a měny
 def get_ticker_and_currency(symbol):
-    symbol_upper = symbol.upper()
+    # Převod na velká písmena a náhrada čárek za tečky (robustnější čtení z XTB reportu)
+    symbol_upper = symbol.upper().replace(',', '.') 
     
-    # === OPRAVA PRO GOOGLE/ALPHABET (Zajišťuje, že se načte GOOGL nebo GOOG) ===
-    # GOOGL je ticker pro Class A (voting)
-    if symbol_upper == 'GOOGL' or symbol_upper == 'GOOGL.US':
+    # === ROBUSTNÍ OPRAVA PRO GOOGLE/ALPHABET (VÍME, ŽE JE TO GOOGL.US) ===
+    # Tím, že to je nahoře, má to prioritu před generickým .US.
+    if symbol_upper.startswith('GOOGL'):
         return 'GOOGL', 'USD' 
-    # GOOG je ticker pro Class C (non-voting)
-    if symbol_upper == 'GOOG' or symbol_upper == 'GOOG.US':
+    if symbol_upper.startswith('GOOG') and symbol_upper != 'GOOGLE': 
         return 'GOOG', 'USD'
-    # ===========================================================================
+    # =====================================================================
     
     if symbol_upper == 'CSPX.UK' or symbol_upper == 'CSPX':
         return 'CSPX.L', 'USD' 
@@ -182,6 +182,7 @@ def get_ticker_and_currency(symbol):
     if 'TUI' in symbol_upper and symbol_upper.endswith('.DE'):
         return 'TUI1.DE', 'EUR'
     elif symbol_upper.endswith('.US'):
+        # Použijeme symbol bez přípony .US
         return symbol_upper[:-3], 'USD'
     elif symbol_upper.endswith('.DE'):
         return symbol_upper[:-3] + '.DE', 'EUR'
@@ -189,7 +190,9 @@ def get_ticker_and_currency(symbol):
         return symbol_upper[:-3] + '.MI', 'EUR'
     elif symbol_upper.endswith('.UK'):
         return symbol_upper[:-3] + '.L', 'GBP' 
-    return symbol, 'USD'
+        
+    return symbol_upper, 'USD'
+
 
 # Funkce pro stažení aktuálních cen (batch processing + Caching)
 @st.cache_data(ttl=600)
@@ -262,7 +265,7 @@ def calculate_positions(transactions):
             positions[symbol]['avg_price'] = positions[symbol]['total_cost'] / positions[symbol]['quantity']
         else:
             positions[symbol]['avg_price'] = 0
-    return {k: v for k, v in positions.items() if v['quantity'] > 0} 
+    return {k: v for k: v in positions.items() if v['quantity'] > 0} 
 
 # Historická data (s cachingem) - PŮVODNÍ, FUNKČNÍ LOGIKA
 @st.cache_data(ttl=3600)
@@ -735,5 +738,3 @@ if uploaded_file is not None:
             )
             
             st.success("Manuální úpravy byly uloženy. Pro zobrazení nového přehledu **musíte znovu kliknout na 'Trackuj Portfolio a Získej Aktuální Data'.**")
-            
-        # ====================================================================
