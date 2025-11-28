@@ -5,27 +5,8 @@ from datetime import datetime
 import numpy as np
 import plotly.express as px
 import warnings 
-import json 
-import os 
-
 # Potlačení FutureWarnings (které často generuje yfinance)
 warnings.simplefilter(action='ignore', category=FutureWarning)
-
-# --- NAČTENÍ EXTERNÍ MAPY TICKERŮ ---
-
-TICKER_MAP = {}
-MAP_FILE = 'ticker_map.json'
-
-if os.path.exists(MAP_FILE):
-    try:
-        with open(MAP_FILE, 'r', encoding='utf-8') as f:
-            TICKER_MAP = json.load(f)
-        st.success(f"Načtena externí mapa tickerů z '{MAP_FILE}'.")
-    except Exception as e:
-        st.error(f"Chyba při načítání '{MAP_FILE}'. Mapování může být nekompletní. Chyba: {e}")
-else:
-    st.warning(f"Soubor '{MAP_FILE}' nenalezen. Používám pouze generická pravidla.")
-
 
 # --- 1. KOSMETIKA & CSS (Styling pro čistě černý motiv - MAXIMÁLNÍ VYNUCENÍ) ---
 st.markdown("""
@@ -181,29 +162,28 @@ st.markdown("""
 
 # --- 2. FUNKCE PRO ZÍSKÁNÍ DAT ---
 
-# Nová funkce pro bezpečnou konverzi na čísla (Float)
-def safe_to_numeric(series):
-    """
-    Pokusí se převést sérii na číselný typ (float). 
-    Případné chyby (text, prázdné buňky, NaN) nahradí nulou.
-    """
-    # Použijeme errors='coerce', které převede nečíselné hodnoty na NaN, 
-    # a následně NaN nahradíme 0.0
-    return pd.to_numeric(series, errors='coerce').fillna(0.0)
-
-
 # Funkce pro mapování XTB symbolů na yfinance tickery a měny
 def get_ticker_and_currency(symbol):
-    # Převod na velká písmena a náhrada čárek za tečky
+    # Převod na velká písmena a náhrada čárek za tečky (robustnější čtení z XTB reportu)
     symbol_upper = symbol.upper().replace(',', '.') 
     
-    # 1. Kontrola externí mapy (Nejvyšší priorita)
-    if symbol_upper in TICKER_MAP:
-        mapping = TICKER_MAP[symbol_upper]
-        return mapping['ticker'], mapping['currency']
+    # === 1. NEJTVRDŠÍ PRAVIDLA PRO GOOGLE/ALPHABET (MUSÍ MÍT PRIORITU) ===
+    # Tím, že to je nahoře, má to prioritu před generickým .US.
+    if symbol_upper.startswith('GOOGL'):
+        # Vezme GOOGL.US a vrátí GOOGL. Ticker na yfinance je GOOGL (Class C)
+        return 'GOOGL', 'USD' 
+    if symbol_upper.startswith('GOOG') and symbol_upper != 'GOOGLE': 
+        # Ticker na yfinance je GOOG (Class A)
+        return 'GOOG', 'USD'
+    # =====================================================================
     
-    # 2. Generická pravidla pro přípony (Fallback)
-    if symbol_upper.endswith('.US'):
+    if symbol_upper == 'CSPX.UK' or symbol_upper == 'CSPX':
+        return 'CSPX.L', 'USD' 
+    if symbol_upper == 'CNDX.UK' or symbol_upper == 'CNDX':
+        return 'CNDX.L', 'USD' 
+    if 'TUI' in symbol_upper and symbol_upper.endswith('.DE'):
+        return 'TUI1.DE', 'EUR'
+    elif symbol_upper.endswith('.US'):
         # Použijeme symbol bez přípony .US
         return symbol_upper[:-3], 'USD'
     elif symbol_upper.endswith('.DE'):
@@ -211,14 +191,13 @@ def get_ticker_and_currency(symbol):
     elif symbol_upper.endswith('.IT'):
         return symbol_upper[:-3] + '.MI', 'EUR'
     elif symbol_upper.endswith('.UK'):
-        # Použijeme LSE kód pro yfinance
         return symbol_upper[:-3] + '.L', 'GBP' 
         
-    # 3. Výchozí hodnota
     return symbol_upper, 'USD'
 
 
 # Funkce pro stažení aktuálních cen (batch processing + Caching)
+# POZNÁMKA: Nastavení ttl=0 vynucuje stažení při každém spuštění aplikace (i když to může být pomalé)
 @st.cache_data(ttl=600) 
 def get_current_prices(symbols):
     if not symbols:
@@ -229,7 +208,7 @@ def get_current_prices(symbols):
     currency_rates = {'USD': 1.0}
     currency_tickers = [f"{curr}USD=X" for curr in currencies_to_fetch]
     
-    # Stažení kurzů měn
+    # Původní, méně agresivní ošetření chyb pro aktuální ceny
     if currency_tickers:
         try:
             rates_data = yf.download(currency_tickers, period='1d', progress=False)['Close']
@@ -242,11 +221,11 @@ def get_current_prices(symbols):
                     rate = rates_data[curr_ticker].iloc[-1] if not rates_data[curr_ticker].empty else 1.0
                     currency_rates[currency] = rate
         except:
+            st.warning("Problém se stažením kurzu, používám výchozí 1.0.")
             pass 
             
     prices = {}
     
-    # Stažení cen akcií
     try:
         data = yf.download(yf_tickers, period='1d', progress=False)['Close']
         if isinstance(data, pd.Series): 
@@ -254,6 +233,7 @@ def get_current_prices(symbols):
             price = data.iloc[-1]
             for symbol, (t, curr) in ticker_map.items():
                 if t == ticker:
+                    # Pokud Yahoo nevrátí cenu, price bude NaN. Zde používáme np.nan. 
                     prices[symbol] = price * currency_rates.get(curr, 1.0) if pd.notna(price) else 0.0
                     break
         else: 
@@ -264,18 +244,16 @@ def get_current_prices(symbols):
                 except (KeyError, IndexError):
                     prices[symbol] = 0.0
     except:
-        # TENTO BLOCK JE POSLEDNÍ ZÁCHRANA PŘI CHYBĚ SPOJENÍ S YFINANCE
+        st.error("Nepodařilo se stáhnout ceny pro jeden nebo více symbolů (pravděpodobně chyba Yahoo Finance). Používám 0 pro chybějící data.")
         for symbol in symbols:
              prices[symbol] = 0.0
              
+    # Vracíme dictionary cen (pokud yfinance selže, cena je 0.0)
     return prices
 
 # Funkce pro výpočet otevřených pozic (statická data z reportu)
 def calculate_positions(transactions):
     positions = {}
-    # Před samotným výpočtem nákladů je nutné zajistit, že 'Purchase value' je numeric
-    transactions['Purchase value'] = safe_to_numeric(transactions['Purchase value'])
-    
     for _, row in transactions.iterrows():
         if pd.isna(row['Symbol']): continue
         symbol = row['Symbol']
@@ -284,23 +262,19 @@ def calculate_positions(transactions):
         transaction_type = row['Type']
         if symbol not in positions:
             positions[symbol] = {'quantity': 0, 'total_cost': 0}
-        
-        # Sčítáme nákupní hodnoty a množství pro průměrování
         if 'BUY' in transaction_type.upper():
             positions[symbol]['quantity'] += quantity
             positions[symbol]['total_cost'] += purchase_value
-            
     for symbol in positions:
         if positions[symbol]['quantity'] > 0:
             positions[symbol]['avg_price'] = positions[symbol]['total_cost'] / positions[symbol]['quantity']
         else:
             positions[symbol]['avg_price'] = 0
-            
-    # Filtrujeme pouze aktivní pozice (s množstvím > 0)
+    # OPRAVENÁ SYNTAXE
     return {k: v for k, v in positions.items() if v['quantity'] > 0} 
 
 # Historická data (s cachingem)
-@st.cache_data(ttl=86400) 
+@st.cache_data(ttl=3600)
 def get_historical_prices(symbols, start_date, end_date):
     hist_prices = {}
     currencies = set(get_ticker_and_currency(s)[1] for s in symbols if get_ticker_and_currency(s)[1] != 'USD')
@@ -323,6 +297,7 @@ def get_historical_prices(symbols, start_date, end_date):
     for symbol in symbols:
         ticker, currency = get_ticker_and_currency(symbol)
         try:
+            # Původní metoda Ticker().history()
             df = yf.Ticker(ticker).history(start=start_date, end=end_date) 
             prices = df['Close'].fillna(method='ffill')
             if currency != 'USD' and currency in hist_rates:
@@ -425,48 +400,21 @@ if uploaded_file is not None:
             with st.spinner('Počítám metriky a stahuji data z Yahoo Finance...'):
                 positions = calculate_positions(df_open)
                 
-                # VÝPOČET DIVIDENDY (NET) - APLIKACE SAFE KONVERZE
+                # VÝPOČET DIVIDEND
                 if 'Type' in df_cash.columns and 'Amount' in df_cash.columns:
-                    df_cash['Amount'] = safe_to_numeric(df_cash['Amount']) 
-                    
-                    dividends_and_tax_df = df_cash[
-                        df_cash['Type'].astype(str).str.upper().str.contains('DIVIDENT', na=False) |
-                        df_cash['Type'].astype(str).str.upper().str.contains('WITHHOLDING TAX', na=False)
-                    ]
-                    total_dividends = dividends_and_tax_df['Amount'].sum() if not dividends_and_tax_df.empty else 0
+                    dividends_df = df_cash[df_cash['Type'].astype(str).str.upper().str.contains('DIVIDENT', na=False)]
+                    total_dividends = dividends_df['Amount'].sum() if not dividends_df.empty else 0
                 else:
                     total_dividends = 0
                 
-                # VÝPOČET REALIZOVANÉHO ZISKU - APLIKACE SAFE KONVERZE
-                if 'Gross P/L' in df_closed.columns:
-                    df_closed['Gross P/L'] = safe_to_numeric(df_closed['Gross P/L'])
-                    realized_profit = df_closed['Gross P/L'].sum()
-                    st.session_state['realized_profit'] = realized_profit
-                else:
-                    st.session_state['realized_profit'] = 0
-                
-                # VÝPOČET OTEVŘENÝCH POPLATKŮ (SWAP, KOMISE, ROLLOVER) - APLIKACE SAFE KONVERZE
-                if all(col in df_open.columns for col in ['Commission', 'Swap', 'Rollover']):
-                    df_open['Commission'] = safe_to_numeric(df_open['Commission'])
-                    df_open['Swap'] = safe_to_numeric(df_open['Swap'])
-                    df_open['Rollover'] = safe_to_numeric(df_open['Rollover'])
-                    
-                    open_fees = df_open['Commission'].sum() + df_open['Swap'].sum() + df_open['Rollover'].sum()
-                    st.session_state['open_fees'] = open_fees
-                    st.success(f"Započteny poplatky/swap (vstupní data): {round(open_fees, 2):.2f} USD")
-                else:
-                    st.session_state['open_fees'] = 0
-
-
                 if not positions:
                     st.warning('Žádné aktivní otevřené pozice nebyly nalezeny ve vstupních datech.')
                     st.session_state['positions_df'] = pd.DataFrame()
                     st.session_state['total_invested'] = 0
-                    st.session_state['total_dividends'] = 0
-                    st.session_state['open_fees'] = 0 
+                    st.session_state['total_dividends'] = 0 
                 else:
                     symbols = list(positions.keys())
-                    # Zde se zavolá get_current_prices se správným mapováním z JSON
+                    # Zde se zavolá get_current_prices se správným mapováním GOOGL.US -> GOOGL
                     current_prices = get_current_prices(symbols)
 
                     table_data = []
@@ -503,26 +451,27 @@ if uploaded_file is not None:
         # --- 5. Přepočet metrik (Na základě dat v Session State) ---
         
         edited_df = st.session_state['positions_df'].copy()
-        total_dividends = st.session_state['total_dividends'] 
-        realized_profit = st.session_state['realized_profit'] 
-        open_fees = st.session_state['open_fees'] 
+        total_dividends = st.session_state['total_dividends'] # Načtení dividend
 
-        # VÝPOČET HODNOT POZIC
+        # Před výpočtem nulujeme nuly pro bezpečnější výpočet
+        edited_df['Aktuální cena (USD)'] = edited_df['Aktuální cena (USD)'].replace(0.0, 0.01)
+
         edited_df['Velikost pozice (USD)'] = edited_df['Množství'] * edited_df['Aktuální cena (USD)']
+        edited_df['Nerealizovaný Zisk (USD)'] = (edited_df['Aktuální cena (USD)'] - edited_df['Průměrná cena (USD)']) * edited_df['Množství']
         
-        # VÝPOČET NEREALIZOVANÉHO ZISKU (P/L = Aktuální hodnota - Náklad)
-        edited_df['Nerealizovaný Zisk (USD)'] = edited_df['Velikost pozice (USD)'] - edited_df['Náklad pozice (USD)']
-        
-        # Nerealizovaný % zisk
+        # Zde nahradíme zpět 0.01 za 0.0 pro správné zobrazení, pokud byl problém s cenou
+        edited_df['Aktuální cena (USD)'] = edited_df['Aktuální cena (USD)'].replace(0.01, 0.0)
+        edited_df.loc[edited_df['Aktuální cena (USD)'] == 0.0, 'Velikost pozice (USD)'] = 0.0
+        edited_df.loc[edited_df['Aktuální cena (USD)'] == 0.0, 'Nerealizovaný Zisk (USD)'] = edited_df['Náklad pozice (USD)'] * -1
+
+        # Nerealizovaný % zisk musí počítat jen z platných nákladů
         def calculate_pct_profit(row):
-            cost = row['Náklad pozice (USD)']
-            if cost == 0:
+            if row['Náklad pozice (USD)'] == 0:
                 return 0.0
-            # Pokud je aktuální hodnota 0, zisk je -100%
+            # Pokud je aktuální cena 0, nastavíme % zisk na -100%
             if row['Aktuální cena (USD)'] == 0.0:
                  return -100.0
-            # P/L % = (Zisk / Náklad) * 100
-            return (row['Nerealizovaný Zisk (USD)'] / cost * 100)
+            return (row['Nerealizovaný Zisk (USD)'] / row['Náklad pozice (USD)'] * 100)
 
         edited_df['Nerealizovaný % Zisk'] = edited_df.apply(calculate_pct_profit, axis=1)
 
@@ -538,11 +487,11 @@ if uploaded_file is not None:
         
         positions_df = edited_df.copy() 
         
-        # --- 6. VÝKONNOSTNÍ BOXY (S Realizovaným Ziskem) ---
+        # --- 6. VÝKONNOSTNÍ BOXY (Preferovaný layout) ---
         
         st.header('Přehled Výkonnosti')
         
-        col1, col2, col3, col4 = st.columns(4) 
+        col1, col2, col3 = st.columns(3) 
 
         # Box 1: HODNOTA PORTFOLIA (Hlavní - MODRÁ)
         with col1:
@@ -550,68 +499,51 @@ if uploaded_file is not None:
             <div class="custom-card main-card">
                 <div class="card-title">HODNOTA PORTFOLIA</div>
                 <p class="main-card-value">{round(total_portfolio_value, 2):,.2f} USD</p>
-                <p style="font-size:12px; margin-top:5px; color:#fafafa;">Aktuální tržní hodnota</p>
-            </div>
-            """, unsafe_allow_html=True)
-            
-        # Box 2: REALIZOVANÝ ZISK
-        with col2:
-            val_class = "value-positive" if realized_profit >= 0 else "value-negative"
-            st.markdown(f"""
-            <div class="custom-card">
-                <div class="card-title">REALIZOVANÝ ZISK</div>
-                <p class="card-value {val_class}">{round(realized_profit, 2):,.2f} USD</p>
-                <p style="font-size:12px; color:#999999;">Uzavřené pozice (P/L)</p>
+                <p style="font-size:12px; margin-top:5px; color:#fafafa;">K {datetime.now().strftime('%d. %m. %Y')}</p>
             </div>
             """, unsafe_allow_html=True)
 
-        # Box 3: NEREALIZOVANÝ ZISK
+        # Box 2: CELKEM VYPLACENÉ DIVIDENDY (Symetrická karta)
+        with col2:
+            val_class = "value-positive" if total_dividends >= 0 else "value-negative"
+            st.markdown(f"""
+            <div class="custom-card">
+                <div class="card-title">CELKEM VYPLACENÉ DIVIDENDY</div>
+                <p class="card-value {val_class}">{round(total_dividends, 2):,.2f} USD</p>
+                <p style="font-size:12px; color:#999999;">Od počátku reportu</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Box 3: NEREALIZOVANÝ ZISK (Symetrická karta)
         with col3:
             val_class = "value-positive" if unrealized_profit >= 0 else "value-negative"
             st.markdown(f"""
             <div class="custom-card">
                 <div class="card-title">NEREALIZOVANÝ ZISK</div>
                 <p class="card-value {val_class}">{round(unrealized_profit, 2):,.2f} USD</p>
-                <p style="font-size:12px; color:#999999;">{round(unrealized_profit_pct, 2):,.2f} % investice</p>
+                <p style="font-size:12px; color:#999999;">{round(unrealized_profit_pct, 2):,.2f} % celkové investice</p>
             </div>
             """, unsafe_allow_html=True)
         
-        # Box 4: CELKEM VYPLACENÉ DIVIDENDY
+        # Druhý řádek: CELKOVÁ HODNOTA a INVESTOVANÁ ČÁSTKA
+        col4, col5 = st.columns(2)
+        
+        # Box 4: CELKOVÁ HODNOTA (Portfolio + Dividendy)
         with col4:
-            val_class = "value-positive" if total_dividends >= 0 else "value-negative"
+            total_value_with_profit = total_portfolio_value + unrealized_profit
             st.markdown(f"""
             <div class="custom-card">
-                <div class="card-title">CELKEM VYPLACENÉ DIVIDENDY</div>
-                <p class="card-value {val_class}">{round(total_dividends, 2):,.2f} USD</p>
-                <p style="font-size:12px; color:#999999;">Připsané dividendy (Net, po zdanění)</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        # Druhý řádek: CELKOVÝ ČISTÝ ZISK a INVESTOVANÁ ČÁSTKA
-        
-        # KONEČNÁ KALKULACE: Nerealizovaný + Realizovaný + Net Dividendy + Poplatky z otevřených pozic (záporné)
-        total_profit = unrealized_profit + realized_profit + total_dividends + open_fees
-        
-        col5, col6 = st.columns(2)
-        
-        # Box 5: CELKOVÝ ČISTÝ ZISK (Klíčová metrika - Kolik jste celkem vydělal/ztratil)
-        with col5:
-            val_class = "value-positive" if total_profit >= 0 else "value-negative"
-            st.markdown(f"""
-            <div class="custom-card">
-                <div class="card-title">CELKOVÝ ČISTÝ ZISK (P&L)</div>
-                <p class="card-value {val_class}">{round(total_profit, 2):,.2f} USD</p>
-                <p style="font-size:12px; color:#999999;">Nerealizovaný (vč. poplatků) + Realizovaný + Dividendy (Net)</p>
+                <div class="card-title">CELKOVÁ HODNOTA (Portfolio + Dividendy)</div>
+                <p class="card-value value-neutral">{round(total_value_with_profit, 2):,.2f} USD</p>
             </div>
             """, unsafe_allow_html=True)
 
-        # Box 6: INVESTOVANÁ ČÁSTKA
-        with col6:
+        # Box 5: INVESTOVANÁ ČÁSTKA
+        with col5:
             st.markdown(f"""
             <div class="custom-card">
-                <div class="card-title">INVESTOVANÁ ČÁSTKA (Cost Basis)</div>
+                <div class="card-title">INVESTOVANÁ ČÁSTKA</div>
                 <p class="card-value value-neutral">{round(total_invested, 2):,.2f} USD</p>
-                <p style="font-size:12px; color:#999999;">Náklady na otevřené pozice</p>
             </div>
             """, unsafe_allow_html=True)
         
@@ -640,6 +572,7 @@ if uploaded_file is not None:
             portfolio_history = pd.DataFrame(index=pd.to_datetime(pd.date_range(start=start_date, end=end_date)))
             
             for symbol in symbols_hist:
+                # Ošetření, pokud pozice neexistuje nebo je 0
                 pos_data = positions_df[positions_df['Název'] == symbol]
                 if pos_data.empty: continue
                 
@@ -666,6 +599,7 @@ if uploaded_file is not None:
                     template='plotly_dark' 
                 )
                 
+                # Sjednocené pozadí grafu - ČISTĚ ČERNÁ
                 PLOTLY_BG_COLOR = '#000000' 
                 fig_hist.update_layout(
                     plot_bgcolor=PLOTLY_BG_COLOR,
@@ -683,6 +617,8 @@ if uploaded_file is not None:
         # --- 8. Koláčové grafy rozložení portfolia (Donut Charts) ---
         
         st.subheader('Rozložení Portfolia')
+        
+        # 8a. Rozdělení na ETF vs. Akcie (Stocks)
         
         def categorize_asset(symbol):
             symbol_upper = symbol.upper()
@@ -727,6 +663,8 @@ if uploaded_file is not None:
             else:
                 st.info('Pro zobrazení alokačního grafu musíte mít otevřené pozice.')
                 
+        # 8b. Rozdělení podle jednotlivých tickerů (původní graf)
+        
         with col_pie_2:
             pie_data = positions_df[positions_df['Velikost pozice (USD)'] > 0]
             
@@ -756,7 +694,10 @@ if uploaded_file is not None:
                 )
                 
                 st.plotly_chart(fig_ticker, use_container_width=True)
-        
+            else:
+                # Už zobrazeno v prvním sloupci, ale pro jistotu
+                pass
+            
         st.write('---')
 
         # --- 9. Zobrazení tabulky s finálními hodnotami (Pouze pro čtení) ---
