@@ -265,7 +265,8 @@ def calculate_positions(transactions):
             positions[symbol]['avg_price'] = positions[symbol]['total_cost'] / positions[symbol]['quantity']
         else:
             positions[symbol]['avg_price'] = 0
-    return {k: v for k: v in positions.items() if v['quantity'] > 0} 
+    # OPRAVENÁ SYNTAXE: použito 'k, v in' místo 'k: v in'
+    return {k: v for k, v in positions.items() if v['quantity'] > 0} 
 
 # Historická data (s cachingem) - PŮVODNÍ, FUNKČNÍ LOGIKA
 @st.cache_data(ttl=3600)
