@@ -167,8 +167,7 @@ def get_ticker_and_currency(symbol):
     # Převod na velká písmena a náhrada čárek za tečky (robustnější čtení z XTB reportu)
     symbol_upper = symbol.upper().replace(',', '.') 
     
-    # === ROBUSTNÍ OPRAVA PRO GOOGLE/ALPHABET (VÍME, ŽE JE TO GOOGL.US) ===
-    # Tím, že to je nahoře, má to prioritu před generickým .US.
+    # === 1. NEJTVRDŠÍ PRAVIDLA PRO GOOGLE/ALPHABET (MUSÍ MÍT PRIORITU) ===
     if symbol_upper.startswith('GOOGL'):
         return 'GOOGL', 'USD' 
     if symbol_upper.startswith('GOOG') and symbol_upper != 'GOOGLE': 
@@ -265,10 +264,10 @@ def calculate_positions(transactions):
             positions[symbol]['avg_price'] = positions[symbol]['total_cost'] / positions[symbol]['quantity']
         else:
             positions[symbol]['avg_price'] = 0
-    # OPRAVENÁ SYNTAXE: použito 'k, v in' místo 'k: v in'
+    # OPRAVENÁ SYNTAXE
     return {k: v for k, v in positions.items() if v['quantity'] > 0} 
 
-# Historická data (s cachingem) - PŮVODNÍ, FUNKČNÍ LOGIKA
+# Historická data (s cachingem)
 @st.cache_data(ttl=3600)
 def get_historical_prices(symbols, start_date, end_date):
     hist_prices = {}
@@ -314,8 +313,8 @@ st.info('Nahraj Excel/CSV report z XTB. Všechny hodnoty jsou automaticky převe
 uploaded_file = st.file_uploader('Nahraj CSV nebo Excel report z XTB', type=['csv', 'xlsx'])
 
 df_open = pd.DataFrame()
-df_closed = pd.DataFrame() # Bude sice stále načten pro kompatibilitu, ale nepoužit pro zisk
-df_cash = pd.DataFrame() # Nový DataFrame pro hotovostní operace (dividendy)
+df_closed = pd.DataFrame() 
+df_cash = pd.DataFrame() 
 
 # Načítání souboru
 if uploaded_file is not None:
@@ -325,13 +324,11 @@ if uploaded_file is not None:
             sheets = excel.sheet_names
             open_sheet = next((s for s in sheets if 'OPEN POSITION' in s.upper()), None)
             closed_sheet = next((s for s in sheets if 'CLOSED POSITION' in s.upper()), None)
-            # NOVÝ SHEET pro hotovostní operace
             cash_sheet = next((s for s in sheets if 'CASH OPERATION' in s.upper()), None)
             
             # --- Robustní hledání hlaviček ---
             
-            # VYLEPŠENÍ: Přidání 'engine=openpyxl' pro spolehlivé čtení Excelu
-            
+            # OPEN POSITION
             if open_sheet:
                 df_full = pd.read_excel(uploaded_file, sheet_name=open_sheet, header=None, engine='openpyxl')
                 header_index = df_full[df_full.iloc[:, 0].astype(str) == 'Position'].index.min()
@@ -340,6 +337,7 @@ if uploaded_file is not None:
                 else:
                     df_open = pd.read_excel(uploaded_file, sheet_name=open_sheet, header=10, engine='openpyxl').dropna(how='all')
             
+            # CLOSED POSITION
             if closed_sheet:
                 df_full_closed = pd.read_excel(uploaded_file, sheet_name=closed_sheet, header=None, engine='openpyxl')
                 header_index_closed = df_full_closed[df_full_closed.iloc[:, 0].astype(str) == 'Position'].index.min()
@@ -348,10 +346,9 @@ if uploaded_file is not None:
                 else:
                     df_closed = pd.read_excel(uploaded_file, sheet_name=closed_sheet, header=9, engine='openpyxl').dropna(how='all')
             
-            # NAČTENÍ CASH OPERATION HISTORY
+            # CASH OPERATION HISTORY
             if cash_sheet:
                  df_full_cash = pd.read_excel(uploaded_file, sheet_name=cash_sheet, header=None, engine='openpyxl')
-                 # Hledání hlavičky 'ID' - předpokládáme 10 řádek nad "ID"
                  header_index_cash = df_full_cash[df_full_cash.iloc[:, 1].astype(str) == 'ID'].index.min()
                  if not pd.isna(header_index_cash):
                      df_cash = pd.read_excel(uploaded_file, sheet_name=cash_sheet, header=header_index_cash, engine='openpyxl').dropna(how='all')
@@ -360,10 +357,9 @@ if uploaded_file is not None:
                  st.success("Načtena historie hotovostních operací (pro dividendy).")
 
         else: # HANDLING CSV FILES
-            # U CSV souborů není openpyxl potřeba
+            # Zjednodušená detekce pro CSV
             df_temp = pd.read_csv(uploaded_file, header=10).dropna(how='all')
             
-            # Zjednodušená detekce pro CSV
             if 'Gross P/L' in df_temp.columns and 'Position' in df_temp.columns:
                 df_closed = df_temp
                 st.success("Načten CSV soubor: Uzavřené pozice.")
@@ -399,9 +395,7 @@ if uploaded_file is not None:
                 
                 # VÝPOČET DIVIDEND
                 if 'Type' in df_cash.columns and 'Amount' in df_cash.columns:
-                    # Filter for 'DIVIDENT' type and sum the 'Amount' column
                     dividends_df = df_cash[df_cash['Type'].astype(str).str.upper().str.contains('DIVIDENT', na=False)]
-                    # Suma je v USD, protože report je v USD
                     total_dividends = dividends_df['Amount'].sum() if not dividends_df.empty else 0
                 else:
                     total_dividends = 0
