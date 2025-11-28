@@ -325,7 +325,7 @@ if uploaded_file is not None:
             open_sheet = next((s for s in sheets if 'OPEN POSITION' in s.upper()), None)
             closed_sheet = next((s for s in sheets if 'CLOSED POSITION' in s.upper()), None)
             # NOVÝ SHEET pro hotovostní operace
-            # OPRAVA SYNTAXE (cash_sheet = next((s for s for s in sheets... na s for s in sheets...)
+            # OPRAVA SYNTAXE: cash_sheet = next((s for s in sheets...
             cash_sheet = next((s for s in sheets if 'CASH OPERATION' in s.upper()), None)
             
             # --- Robustní hledání hlaviček ---
@@ -451,9 +451,10 @@ if uploaded_file is not None:
         edited_df['Nerealizovaný Zisk (USD)'] = (edited_df['Aktuální cena (USD)'] - edited_df['Průměrná cena (USD)']) * edited_df['Množství']
         edited_df['Nerealizovaný % Zisk'] = (edited_df['Nerealizovaný Zisk (USD)'] / edited_df['Náklad pozice (USD)'] * 100).fillna(0)
         
-        total_portfolio_value = edited_df['Velikost pozice (USD)'].sum()
+        # OPRAVA ZDE: Hodnota portfolia = Investovaná částka + Nerealizovaný zisk
         unrealized_profit = edited_df['Nerealizovaný Zisk (USD)'].sum()
         total_invested = st.session_state['total_invested']
+        total_portfolio_value = total_invested + unrealized_profit # <-- ZMĚNA
         
         unrealized_profit_pct = (unrealized_profit / total_invested * 100) if total_invested > 0 else 0
         
@@ -506,7 +507,7 @@ if uploaded_file is not None:
         
         # Box 4: CELKOVÁ HODNOTA (Portfolio + Dividendy)
         with col4:
-            # OPRAVENO: Celková hodnota = Hodnota portfolia (Market Value) + Celkem přijaté dividendy.
+            # Celková hodnota = Tržní hodnota portfolia + Celkem přijaté dividendy.
             total_value_with_dividends = total_portfolio_value + total_dividends
             st.markdown(f"""
             <div class="custom-card">
@@ -563,6 +564,7 @@ if uploaded_file is not None:
                     prices = prices.reindex(portfolio_history.index, method='ffill')
                     portfolio_history[symbol] = prices * qty
             
+            # Celková hodnota v grafu je stále počítána jako tržní hodnota, aby byl vidět vývoj cen
             portfolio_history['Celková hodnota'] = portfolio_history.sum(axis=1).replace(0, np.nan).fillna(method='ffill')
             
             if not portfolio_history.empty and 'Celková hodnota' in portfolio_history.columns:
@@ -571,7 +573,7 @@ if uploaded_file is not None:
                     portfolio_history.reset_index(), 
                     x='index', 
                     y='Celková hodnota', 
-                    title='Historický vývoj hodnoty portfolia',
+                    title='Historický vývoj hodnoty portfolia (Tržní hodnota)',
                     labels={'index': 'Datum', 'Celková hodnota': 'Hodnota (USD)'},
                     template='plotly_dark' 
                 )
